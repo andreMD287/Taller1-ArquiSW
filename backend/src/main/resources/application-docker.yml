@@ -1,0 +1,17 @@
+# Perfil docker: mismo artefacto, solo cambian variables de entorno/red.
+# El host "postgres" es el nombre del servicio en docker-compose (DNS interno de Compose).
+spring:
+  datasource:
+    url: jdbc:postgresql://postgres:5432/${POSTGRES_DB:authdb}
+    username: ${POSTGRES_USER:auth}
+    password: ${POSTGRES_PASSWORD:auth}
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    root: INFO
+    com.taller.auth: INFO

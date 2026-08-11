@@ -1,0 +1,33 @@
+# Perfil de tests: H2 en memoria, sin Docker. Flyway queda deshabilitado porque
+# V1__init.sql usa sintaxis especifica de Postgres (BIGSERIAL, now()); en vez de
+# mantener dos dialectos de migracion, dejamos que Hibernate genere el esquema
+# desde las entidades solo para este perfil.
+spring:
+  datasource:
+    url: jdbc:h2:mem:authdb;DB_CLOSE_DELAY=-1;MODE=PostgreSQL
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    database-platform: org.hibernate.dialect.H2Dialect
+  flyway:
+    enabled: false
+
+app:
+  lockout:
+    max-attempts: 5
+    lockout-seconds: 60
+  session:
+    ttl-seconds: 1800
+    purge-interval-ms: 60000
+
+features:
+  session-cache: true
+  new-dashboard: false
+
+logging:
+  level:
+    root: WARN
+    com.taller.auth: DEBUG

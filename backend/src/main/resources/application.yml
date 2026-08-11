@@ -1,0 +1,93 @@
+# Configuracion base. Los perfiles (docker, test) solo sobreescriben lo que
+# cambia por entorno: mismo artefacto en todos lados, nunca recompilar (Cap. 5).
+spring:
+  application:
+    name: auth
+  datasource:
+    url: jdbc:postgresql://localhost:5432/authdb
+    username: auth
+    password: auth
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  lifecycle:
+    # da tiempo a que las peticiones en vuelo terminen antes de matar el proceso:
+    # sin esto un rolling upgrade corta conexiones a mitad de respuesta.
+    timeout-per-shutdown-phase: 20s
+
+server:
+  port: 8080
+  # apagado ordenado (graceful): deja de aceptar peticiones nuevas pero termina
+  # las que ya estan en curso antes de cerrar el puerto.
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+      probes:
+        enabled: true
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  metrics:
+    tags:
+      node: ${node.id}
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      dataTier:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+  retry:
+    instances:
+      # solo para operaciones IDEMPOTENTES de lectura contra el tier de datos.
+      # un INSERT no idempotente nunca debe vivir detras de este retry.
+      dataTier:
+        max-attempts: 3
+        wait-duration: 200ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - org.springframework.dao.QueryTimeoutException
+          - org.springframework.dao.DataAccessResourceFailureException
+
+# Configuracion propia del dominio de autenticacion.
+app:
+  lockout:
+    max-attempts: 5
+    lockout-seconds: 60
+  session:
+    ttl-seconds: 1800
+    # intervalo de la tarea @Scheduled que purga sesiones expiradas: una tabla
+    # que crece sin cota es una falta latente que degrada el servicio con el tiempo.
+    purge-interval-ms: 60000
+
+# Feature toggles: desacoplan el despliegue del release (Cap. 5).
+features:
+  session-cache: true
+  new-dashboard: false
+
+node:
+  # identifica el nodo en logs/metricas cuando hay varias replicas detras de nginx.
+  id: ${NODE_ID:local}
+
+logging:
+  level:
+    root: INFO
+    com.taller.auth: DEBUG
