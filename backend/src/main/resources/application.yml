@@ -7,6 +7,13 @@ spring:
     url: jdbc:postgresql://localhost:5432/authdb
     username: auth
     password: auth
+    hikari:
+      # timeouts cortos a proposito: si Postgres esta caido, el pool falla en
+      # segundos en vez de en los 30s por defecto, para que Retry/Circuit
+      # Breaker puedan reaccionar dentro de la ventana de medicion del taller.
+      connection-timeout: 3000
+      validation-timeout: 2000
+      maximum-pool-size: 10
   jpa:
     hibernate:
       ddl-auto: validate
@@ -35,6 +42,11 @@ management:
       show-details: when-authorized
       probes:
         enabled: true
+      group:
+        # el dataTier SOLO entra en readiness, nunca en liveness (ver
+        # DataTierHealthIndicator): evita reinicios en cascada si Postgres cae.
+        readiness:
+          include: readinessState,dataTier
   health:
     livenessstate:
       enabled: true
