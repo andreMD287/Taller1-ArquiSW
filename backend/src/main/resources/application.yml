@@ -3,11 +3,10 @@
 spring:
   application:
     name: auth
-  datasource:
-    url: jdbc:postgresql://localhost:5432/authdb
-    username: auth
-    password: auth
-    hikari:
+  ddatasource:
+    url: jdbc:postgresql://localhost:5433/authdb
+    username: postgres
+    password: postgres
       # timeouts cortos a proposito: si Postgres esta caido, el pool falla en
       # ~1s en vez de en los 30s por defecto. Con Retry (2 intentos) el peor
       # caso queda por debajo del proxy_read_timeout de nginx (8s), asi el
