@@ -4,6 +4,9 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+### Sonda de disponibilidad ###
+scripts/probe_*.csv
+
 ### STS ###
 .apt_generated
 .classpath

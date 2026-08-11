@@ -1,5 +1,6 @@
 package com.taller.auth.service;
 
+import com.taller.auth.exception.AppException;
 import com.taller.auth.exception.DataUnavailableException;
 import com.taller.auth.exception.InvalidSessionException;
 import com.taller.auth.model.SessionEntity;
@@ -61,6 +62,13 @@ public class TokenService {
 
     @SuppressWarnings("unused")
     private SessionEntity createSessionFallback(User user, Throwable t) {
+        // Resilience4j enruta CUALQUIER excepcion al fallback, no solo fallas de
+        // infraestructura: una AppException (EXPECTED) debe seguir de largo tal
+        // cual, o una regla de negocio terminaria disfrazada de caida del tier
+        // de datos. Solo lo que NO es un AppException es un fallo real de datos.
+        if (t instanceof AppException appException) {
+            throw appException;
+        }
         // mitad de la degradacion parcial: si el tier de datos esta caido no se
         // pueden emitir sesiones nuevas. La otra mitad es que las sesiones YA
         // emitidas se sigan validando (ver validateFallback).
@@ -82,6 +90,11 @@ public class TokenService {
 
     @SuppressWarnings("unused")
     private ValidateResult validateFallback(String token, Throwable t) {
+        // una sesion invalida/expirada (EXPECTED) no es una caida del tier de
+        // datos: no debe caer a la cache ni convertirse en 503.
+        if (t instanceof AppException appException) {
+            throw appException;
+        }
         if (!sessionCacheEnabled) {
             throw new DataUnavailableException(t);
         }

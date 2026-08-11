@@ -3,6 +3,7 @@ package com.taller.auth.service;
 import com.taller.auth.dto.LoginResponse;
 import com.taller.auth.dto.ValidateResponse;
 import com.taller.auth.exception.AccountLockedException;
+import com.taller.auth.exception.AppException;
 import com.taller.auth.exception.DataUnavailableException;
 import com.taller.auth.exception.InvalidCredentialsException;
 import com.taller.auth.exception.UserAlreadyExistsException;
@@ -62,6 +63,12 @@ public class AuthService {
 
     @SuppressWarnings("unused")
     private String registerFallback(String username, String rawPassword, Throwable t) {
+        // Resilience4j manda CUALQUIER excepcion al fallback, no solo fallas
+        // reales de infraestructura: un AppException (ej. usuario duplicado,
+        // EXPECTED) debe propagarse tal cual, nunca disfrazarse de 503.
+        if (t instanceof AppException appException) {
+            throw appException;
+        }
         throw new DataUnavailableException(t);
     }
 
@@ -93,6 +100,11 @@ public class AuthService {
 
     @SuppressWarnings("unused")
     private LoginResponse loginFallback(String username, String rawPassword, Throwable t) {
+        // misma razon que en registerFallback: credenciales invalidas o cuenta
+        // bloqueada (EXPECTED) no son una caida del tier de datos.
+        if (t instanceof AppException appException) {
+            throw appException;
+        }
         throw new DataUnavailableException(t);
     }
 

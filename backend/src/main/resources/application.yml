@@ -9,10 +9,11 @@ spring:
     password: auth
     hikari:
       # timeouts cortos a proposito: si Postgres esta caido, el pool falla en
-      # segundos en vez de en los 30s por defecto, para que Retry/Circuit
-      # Breaker puedan reaccionar dentro de la ventana de medicion del taller.
-      connection-timeout: 3000
-      validation-timeout: 2000
+      # ~1s en vez de en los 30s por defecto. Con Retry (2 intentos) el peor
+      # caso queda por debajo del proxy_read_timeout de nginx (8s), asi el
+      # cliente recibe un 503/degraded real en vez de un 504 de nginx.
+      connection-timeout: 1000
+      validation-timeout: 1000
       maximum-pool-size: 10
   jpa:
     hibernate:
@@ -61,23 +62,34 @@ resilience4j:
     instances:
       dataTier:
         sliding-window-size: 10
-        minimum-number-of-calls: 5
+        minimum-number-of-calls: 3
         failure-rate-threshold: 50
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 3
         automatic-transition-from-open-to-half-open-enabled: true
+        # CRITICO: sin esto, el circuit breaker trata CUALQUIER excepcion (una
+        # password incorrecta, un usuario duplicado) como una falla del tier de
+        # datos y la enruta al fallback como si fuera un 503. AppException
+        # cubre todo lo EXPECTED (Cap. 4): eso nunca debe contar como fallo ni
+        # pasar por el fallback, debe llegar tal cual al GlobalExceptionHandler.
+        ignore-exceptions:
+          - com.taller.auth.exception.AppException
   retry:
     instances:
       # solo para operaciones IDEMPOTENTES de lectura contra el tier de datos.
       # un INSERT no idempotente nunca debe vivir detras de este retry.
       dataTier:
-        max-attempts: 3
-        wait-duration: 200ms
+        max-attempts: 2
+        wait-duration: 100ms
         enable-exponential-backoff: true
         exponential-backoff-multiplier: 2
         retry-exceptions:
           - org.springframework.dao.QueryTimeoutException
           - org.springframework.dao.DataAccessResourceFailureException
+        # misma razon que en el circuit breaker: una sesion invalida (EXPECTED)
+        # no debe disparar reintentos ni el fallback de degradacion.
+        ignore-exceptions:
+          - com.taller.auth.exception.AppException
 
 # Configuracion propia del dominio de autenticacion.
 app:
