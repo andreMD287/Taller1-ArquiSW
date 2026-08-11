@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <!-- nombrar el archivo logback-spring.xml (no logback.xml) habilita las
+         extensiones de Spring Boot, entre ellas springProperty. -->
+    <springProperty scope="context" name="nodeId" source="node.id" defaultValue="local"/>
+
+    <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="com.taller.auth.config.JsonLogEncoder"/>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="JSON"/>
+    </root>
+</configuration>
