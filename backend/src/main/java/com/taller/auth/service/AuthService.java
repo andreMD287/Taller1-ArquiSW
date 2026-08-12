@@ -72,8 +72,12 @@ public class AuthService {
         throw new DataUnavailableException(t);
     }
 
+    // noRollbackFor es obligatorio: por defecto Spring revierte la transaccion
+    // ante CUALQUIER RuntimeException, y AppException/InvalidCredentialsException
+    // lo es. Sin esto, el UPDATE que registra un intento fallido se deshace justo
+    // al lanzar la excepcion, y la cuenta nunca llega a bloquearse (ESC-D5 roto).
     @CircuitBreaker(name = "dataTier", fallbackMethod = "loginFallback")
-    @Transactional
+    @Transactional(noRollbackFor = AppException.class)
     public LoginResponse login(String username, String rawPassword) {
         User user = userRepository.findByUsername(username).orElse(null);
         Instant now = Instant.now();

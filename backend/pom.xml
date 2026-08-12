@@ -90,6 +90,16 @@
 			<artifactId>spring-security-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<dependency>
+			<!-- Sin esto, TestRestTemplate usa el HttpURLConnection del JDK, que
+			     lanza "cannot retry due to server authentication, in streaming
+			     mode" en cualquier POST cuya respuesta sea 401 (aunque el 401 no
+			     tenga nada que ver con autenticacion HTTP real). Apache HttpClient
+			     no tiene ese comportamiento. -->
+			<groupId>org.apache.httpcomponents.client5</groupId>
+			<artifactId>httpclient5</artifactId>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>
@@ -97,6 +107,20 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<!-- Surefire por defecto solo reconoce *Test.java: sin esto, "./mvnw test"
+				     ignoraria en silencio las pruebas de integracion *IT (AuthControllerIT,
+				     AvailabilityIT). Un solo comando, una sola fase, cero pasos manuales. -->
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<includes>
+						<include>**/*Test.java</include>
+						<include>**/*Tests.java</include>
+						<include>**/*IT.java</include>
+					</includes>
+				</configuration>
 			</plugin>
 		</plugins>
 	</build>
