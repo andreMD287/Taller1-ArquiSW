@@ -32,12 +32,20 @@ líneas.
 
 Un solo comando, tanto para evaluar en un portátil de un solo nodo como para
 la demo de alta disponibilidad en varios: inicializa el swarm si hace falta,
-genera los secrets (`jwt_secret`, `postgres_password`) si no existen, construye
+genera los secrets (`jwt_secret`, `postgres_password`,
+`postgres_superuser_password`, `repmgr_password`) si no existen, construye
 la imagen y despliega `stack.yml`. La API queda expuesta en
 `http://localhost:8080`, balanceada por el *routing mesh* de Swarm entre las 3
 réplicas del backend — **mismo archivo de despliegue** en 1 nodo o en N (ver
 `stack.yml` para el detalle de por qué Swarm y no Kubernetes ni el
 docker-compose de desarrollo).
+
+El tier de datos son 3 nodos de Postgres (`postgres-1/2/3`, imagen
+`bitnamilegacy/postgresql-repmgr`) con elección de líder y promoción
+automática de un standby si el primario cae (Fase 4). El backend se conecta
+con una URL JDBC multi-host (`POSTGRES_HOSTS`, `targetServerType=primary`):
+el driver prueba los 3 nodos y sigue solo al que sea primario en cada
+momento, sin que haga falta reiniciarlo tras un failover.
 
 Para sumar nodos reales a la demo: `docker swarm join-token worker` en el
 nodo donde corriste `deploy.sh`, y el comando que imprime en cada nodo nuevo.
@@ -99,6 +107,7 @@ códigos.
 | `POSTGRES_DB` | `authdb` | Nombre de la base |
 | `POSTGRES_USER` | `auth` (docker) | Usuario de conexión a Postgres |
 | `POSTGRES_PASSWORD` | `auth` (docker-compose) / secret `postgres_password` (Swarm) | Password de conexión a Postgres |
+| `POSTGRES_HOSTS` | `postgres:5432` (docker-compose) / `postgres-1:5432,postgres-2:5432,postgres-3:5432` (Swarm) | Uno o varios `host:puerto`; el driver JDBC se conecta al que responda como primario (`targetServerType=primary`) y sigue al cluster tras un failover. |
 | `SPRING_PROFILES_ACTIVE` | — | `docker` en compose y en Swarm, `test` para tests/desarrollo local con H2 |
 | `JWT_SECRET` | secret `jwt_secret` (Swarm) / default de conveniencia (docker-compose) | Clave HMAC-SHA256 para firmar/verificar el access token. **Obligatoria** en el perfil `docker`: sin ella la app se niega a arrancar. En `stack.yml` viene de un Docker secret generado por `deploy.sh` (nunca de una variable de entorno plana); `docker-compose.yml` trae un default de conveniencia solo para desarrollo local. Mínimo 32 bytes. |
 | `JWT_TTL_SECONDS` | `900` (15 min) | TTL del access token. Corto a propósito: acota la ventana de un token robado, dado que un JWT no se puede revocar antes de expirar. |
@@ -127,6 +136,43 @@ Redis reintroduce el mismo problema con otro nombre). Se acepta una ventana de
 revocación de hasta `JWT_TTL_SECONDS` (15 min por defecto) a cambio de esa
 independencia del tier de datos.
 
+## Alta disponibilidad de Postgres (Fase 4, refuerzo)
+
+Con la Fase 1 en pie, Postgres solo está en el camino crítico del 5% del
+tráfico (`/login`), así que el objetivo de 99.99% se cumple **con o sin**
+esta fase (ver el modelo en `scripts/availability-model.py`). Esto es
+refuerzo: lleva el MTTR de Postgres de ~1h (intervención manual, el
+escenario del enunciado original) a segundos.
+
+3 nodos (`postgres-1/2/3`, `bitnamilegacy/postgresql-repmgr:16-debian-12`)
+con `repmgrd` corriendo en cada uno: eligen un primario al arrancar
+(`REPMGR_PRIMARY_HOST`) y promueven automáticamente un standby si el
+primario deja de responder. Medido en vivo contra el stack real con
+`scripts/chaos-db-failover.sh`: **~29s** desde que el primario cae hasta que
+un standby queda aceptando escrituras — el backend sigue al nuevo primario
+solo, gracias al `POSTGRES_HOSTS` multi-host, sin reiniciarse.
+
+**Hallazgo real (no un caso hipotético) al construir esto:** revivir al
+viejo primario con su volumen intacto **no** lo hace reincorporarse como
+standby — Bitnami reusa el `PGDATA` existente tal cual, con su rol de
+primario todavía marcado en el WAL, sin comprobar si alguien más fue
+promovido mientras estuvo caído. Eso produce **split-brain** (dos nodos
+aceptando escrituras a la vez), confirmado en vivo con `psql` directo a cada
+nodo. La única manera segura de reincorporarlo es borrar su volumen para
+forzar un re-clonado limpio (`pg_basebackup`) desde el primario real; es
+justo lo que hace `chaos-db-failover.sh` después de medir el failover, y por
+eso `docker kill` no sirve para este experimento (`restart_policy` revive el
+mismo contenedor con el mismo disco antes de que `repmgrd` llegue a
+promover a nadie — hay que apagarlo con `docker service scale =0`).
+
+**Limitación conocida, documentada a propósito y no resuelta en este MVP:**
+los volúmenes de Swarm son locales al nodo. Si el nodo que corría al
+primario **muere de verdad** (no solo el contenedor) y no es el manager, ese
+slot pierde su disco y hace falta re-aprovisionarlo a mano — ese caso sigue
+pareciéndose al escenario original de ~1h, no a los ~30s medidos aquí.
+Cubrirlo de verdad pide almacenamiento distribuido (NFS/EBS/CSI), fuera del
+alcance de un MVP de taller.
+
 ## Scripts (`scripts/`)
 
 Para el stack en Swarm (`stack.yml`):
@@ -148,10 +194,16 @@ Para el stack en Swarm (`stack.yml`):
   MTBF/MTTR observados y percentiles de latencia; deja el CSV crudo en
   `results/probe-<timestamp>.csv`.
 - `chaos.sh` — mata una tarea de `auth_backend` (Swarm la reprograma sola,
-  sin intervención manual) y luego apaga/revive Postgres escalando
-  `auth_postgres` a 0 y de vuelta a 1. Pensado para correr en paralelo con
-  `probe.sh`; deja un log con marcas de tiempo en `results/chaos-<timestamp>.log`
-  para correlacionar las dos corridas.
+  sin intervención manual) y luego apaga/revive el tier de datos **completo**
+  (los 3 nodos de Postgres a la vez, no solo el primario). Pensado para
+  correr en paralelo con `probe.sh`; deja un log con marcas de tiempo en
+  `results/chaos-<timestamp>.log` para correlacionar las dos corridas.
+- `chaos-db-failover.sh` (Fase 4) — identifica el primario actual del
+  cluster repmgr, lo apaga (`docker service scale =0`, no `docker kill`: ver
+  la sección de HA de Postgres arriba), cronometra hasta que un standby es
+  promovido, y lo reincorpora de forma segura (vaciando su volumen para
+  forzar un re-clonado limpio, evitando split-brain). Imprime el MTTR real
+  del failover.
 - `availability-model.py` — el modelo analítico (bloques serie/paralelo) que
   produce el número que se entrega: 99.99% de disponibilidad son ~52.6
   min/año de caída, algo que no se puede demostrar por observación directa en

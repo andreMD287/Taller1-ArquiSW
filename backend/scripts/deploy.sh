@@ -44,6 +44,10 @@ ensure_secret() {
 
 ensure_secret jwt_secret
 ensure_secret postgres_password
+# Fase 4: superusuario de Postgres y usuario interno de repmgr, para el
+# cluster de 3 nodos (postgres-1/2/3) con eleccion de lider automatica.
+ensure_secret postgres_superuser_password
+ensure_secret repmgr_password
 
 echo "[deploy] construyendo auth-backend:latest..."
 docker build -t auth-backend:latest .

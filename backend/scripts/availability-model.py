@@ -10,14 +10,19 @@ chaos.sh + probe.sh); este script toma esos MTTR medidos, los combina con
 el numero de replicas y la mezcla de trafico real del sistema (5% login,
 95% validate), y proyecta la disponibilidad anual esperada.
 
-Topologia modelada (Fase 1 + Fase 2, sin la Fase 4 de HA de Postgres):
+Topologia modelada (Fase 1 + Fase 2 + Fase 4):
 
   - Tier de logica: N replicas del backend en redundancia activa
     (Redundant Spare (active), Cap. 4) detras del routing mesh de Swarm.
     Disponibilidad del pool = 1 - (1 - A_replica) ** N   (al menos 1 arriba).
-  - Tier de datos: UNA instancia de Postgres (Fase 4 la refuerza; sin ella,
-    este es el componente menos disponible del sistema, y por diseno del
-    taller esta FUERA del camino critico del 95% del trafico).
+  - Tier de datos: se modela como UN componente logico ("BD"), sea una
+    instancia unica (sin Fase 4: MTTR ~1h, intervencion manual) o el
+    cluster de 3 nodos con repmgr de la Fase 4 (MTTR ~30s, promocion
+    automatica medida por chaos-db-failover.sh). Lo que cambia entre los
+    dos casos es solo el MTTR que se le pasa a --db-mttr-seconds: el
+    modelo no necesita saber CUANTOS nodos hay detras, le basta con la
+    disponibilidad efectiva resultante. Por diseno del taller, este
+    componente esta FUERA del camino critico del 95% del trafico (Fase 1).
 
   - validate (95% del trafico, por defecto): NO toca el tier de datos
     (Fase 1: JWT verificado en memoria). Su disponibilidad es la del pool
@@ -62,19 +67,23 @@ DEFAULTS_DOC = {
         "chaos.sh + probe.sh (--replica-mttr-seconds o --probe-csv)."
     ),
     "db-mtbf-hours": (
-        "ASUNCION: 2000h entre fallas del contenedor de Postgres. Con una "
-        "sola instancia (sin la Fase 4) es el componente menos disponible "
-        "del sistema; por diseno del taller, esta fuera del camino critico "
-        "del 95% del trafico (ver Fase 1), asi que su impacto en el "
-        "sistema completo queda acotado."
+        "ASUNCION: 2000h entre fallas del tier de datos. Es el componente "
+        "menos disponible del sistema (con o sin Fase 4); por diseno del "
+        "taller, esta fuera del camino critico del 95% del trafico (ver "
+        "Fase 1), asi que su impacto en el sistema completo queda acotado."
     ),
     "db-mttr-seconds": (
-        "ASUNCION/MEDIBLE: 15s para el caso cubierto por este modelo -el "
-        "contenedor de Postgres muere y restart_policy:condition=any lo "
-        "reinicia sobre el MISMO volumen-. NO cubre la caida del nodo "
-        "manager completo (ese caso son las ~1h de intervencion manual del "
-        "enunciado original, y es exactamente lo que la Fase 4 -recortable- "
-        "resuelve con failover automatico de Postgres)."
+        "ASUNCION/MEDIBLE: 15s para el caso SIN Fase 4 -el contenedor de "
+        "Postgres muere y restart_policy:condition=any lo reinicia sobre "
+        "el MISMO volumen-. CON Fase 4 (cluster repmgr de 3 nodos), corre "
+        "scripts/chaos-db-failover.sh: mide el failover automatico real "
+        "(~29s observado en una corrida contra el stack en vivo) y pasa "
+        "ese numero con --db-mttr-seconds. Limitacion conocida de la Fase 4 "
+        "tal como esta implementada (volumenes locales, no almacenamiento "
+        "distribuido): si el nodo que corria al primario MUERE (no solo el "
+        "contenedor) y no es el manager, ese slot pierde su disco y necesita "
+        "re-aprovisionarse a mano; ese caso sigue pareciendose al escenario "
+        "original de ~1h de intervencion manual, no a los ~30s medidos aqui."
     ),
 }
 
@@ -256,7 +265,7 @@ def main() -> int:
     print(f"  {'componente':<28}{'MTBF':>10}{'MTTR':>9}{'disponibilidad':>15}  downtime/ano equiv.")
     print(row("backend (1 replica)", f"{replica_mtbf_hours:.1f}h", f"{replica_mttr_seconds:.1f}s", a_replica))
     print(row(f"backend pool ({args.replicas} replicas)", "n/a", "n/a", a_app_pool))
-    print(row("postgres (1 instancia)", f"{db_mtbf_hours:.1f}h", f"{db_mttr_seconds:.1f}s", a_bd))
+    print(row("postgres (tier de datos)", f"{db_mtbf_hours:.1f}h", f"{db_mttr_seconds:.1f}s", a_bd))
     print()
 
     print("Fuentes de cada parametro:")

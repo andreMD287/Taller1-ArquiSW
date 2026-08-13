@@ -20,36 +20,120 @@ version: "3.8"
 # docker-compose): por diseno, el backend debe tolerar que Postgres no este
 # listo todavia al arrancar. Eso ya lo cubren el Retry/CircuitBreaker de
 # ResilienceConfig, asi que no hace falta orquestar el orden de arranque.
+#
+# FASE 4 (refuerzo, no requisito): Postgres deja de ser una instancia unica.
+# 3 nodos con repmgr (bitnamilegacy/postgresql-repmgr: Bitnami retiro las
+# imagenes "latest" gratuitas de postgresql-repmgr de su namespace normal a
+# mediados de 2025; "bitnamilegacy" es donde quedaron las ultimas versiones
+# publicas sin subscripcion) hacen eleccion de lider y promocion automatica
+# de un standby si el primario muere. Lo que le importa
+# al modelo de disponibilidad no es la redundancia en si, sino el MTTR: sin
+# esto, recuperar Postgres es intervencion manual (~1h, el escenario del
+# enunciado original); con repmgrd corriendo, la promocion es automatica en
+# el orden de segundos (medido por scripts/chaos-db-failover.sh). Con la
+# Fase 1 ya en pie, Postgres solo esta en el camino critico del 5% del
+# trafico (login), asi que el objetivo de 99.99% se cumple CON o SIN esta
+# fase (ver Fase 3); esto es lo que lleva ese 5% de 99.9% a 99.999%.
+#
+# No es Kubernetes: en Swarm no existe el equivalente a un StatefulSet con
+# volumenes por replica, asi que cada nodo es un SERVICIO propio (no
+# "replicas: 3" de un solo servicio) con su propio volumen. Limitacion
+# conocida y documentada: los volumenes "local" son del nodo donde corren;
+# si un nodo NO-manager muere, ese slot pierde sus datos locales y necesita
+# re-aprovisionarse (repmgr no arregla la perdida de disco, solo la caida
+# del proceso/contenedor). Cubrir eso de verdad pide almacenamiento
+# distribuido (NFS/EBS/CSI), fuera del alcance de un MVP de taller.
+x-postgres-repmgr-env: &postgres-repmgr-env
+  POSTGRESQL_POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
+  POSTGRESQL_USERNAME: auth
+  POSTGRESQL_PASSWORD_FILE: /run/secrets/postgres_password
+  POSTGRESQL_DATABASE: authdb
+  REPMGR_PASSWORD_FILE: /run/secrets/repmgr_password
+  REPMGR_PARTNER_NODES: postgres-1,postgres-2,postgres-3
+  REPMGR_PRIMARY_HOST: postgres-1
+  REPMGR_PORT_NUMBER: "5432"
+
+x-postgres-repmgr-secrets: &postgres-repmgr-secrets
+  - postgres_superuser_password
+  - postgres_password
+  - repmgr_password
+
+x-postgres-repmgr-healthcheck: &postgres-repmgr-healthcheck
+  # PGPASSWORD no lee _FILE (eso es una convencion de las imagenes de
+  # Bitnami/Postgres para SUS entrypoints, no de libpq/psql): el password
+  # hay que leerlo del secret a mano en el propio comando del healthcheck.
+  # $$ (no $): "docker stack deploy" interpola $ como variable de Compose,
+  # hay que escaparlo para que el shell del contenedor vea un solo $.
+  test: ["CMD-SHELL", "PGPASSWORD=$$(cat /run/secrets/postgres_password) psql -h 127.0.0.1 -U auth -d authdb -c 'select 1' > /dev/null"]
+  interval: 10s
+  timeout: 5s
+  # start_period generoso: el bootstrap del cluster (clonar desde el
+  # primario via pg_basebackup) tarda mas que el arranque de un Postgres
+  # normal, sobre todo para postgres-2/postgres-3.
+  start_period: 60s
+  retries: 6
 
 services:
-  postgres:
-    image: postgres:16-alpine
+  postgres-1:
+    image: bitnamilegacy/postgresql-repmgr:16-debian-12
+    hostname: postgres-1
     environment:
-      POSTGRES_DB: authdb
-      POSTGRES_USER: auth
-      # el propio entrypoint de la imagen oficial de postgres sabe leer
-      # variables *_FILE: no hace falta un wrapper propio para este servicio.
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-    secrets:
-      - postgres_password
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U auth -d authdb"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      <<: *postgres-repmgr-env
+      REPMGR_NODE_NAME: postgres-1
+      REPMGR_NODE_NETWORK_NAME: postgres-1
+    secrets: *postgres-repmgr-secrets
+    healthcheck: *postgres-repmgr-healthcheck
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata1:/bitnami/postgresql
     networks:
       - auth-net
     deploy:
       replicas: 1
-      # "pgdata" es un volumen local al nodo: fijar el servicio al manager
-      # evita que Swarm lo reprograme a un nodo sin los datos si el manager
-      # sigue vivo. Es refuerzo, no HA real de datos (eso es la Fase 4,
-      # recortable); si el nodo manager muere, este servicio no se reubica.
       placement:
-        constraints:
-          - node.role == manager
+        preferences:
+          - spread: node.hostname
+      restart_policy:
+        condition: any
+
+  postgres-2:
+    image: bitnamilegacy/postgresql-repmgr:16-debian-12
+    hostname: postgres-2
+    environment:
+      <<: *postgres-repmgr-env
+      REPMGR_NODE_NAME: postgres-2
+      REPMGR_NODE_NETWORK_NAME: postgres-2
+    secrets: *postgres-repmgr-secrets
+    healthcheck: *postgres-repmgr-healthcheck
+    volumes:
+      - pgdata2:/bitnami/postgresql
+    networks:
+      - auth-net
+    deploy:
+      replicas: 1
+      placement:
+        preferences:
+          - spread: node.hostname
+      restart_policy:
+        condition: any
+
+  postgres-3:
+    image: bitnamilegacy/postgresql-repmgr:16-debian-12
+    hostname: postgres-3
+    environment:
+      <<: *postgres-repmgr-env
+      REPMGR_NODE_NAME: postgres-3
+      REPMGR_NODE_NETWORK_NAME: postgres-3
+    secrets: *postgres-repmgr-secrets
+    healthcheck: *postgres-repmgr-healthcheck
+    volumes:
+      - pgdata3:/bitnami/postgresql
+    networks:
+      - auth-net
+    deploy:
+      replicas: 1
+      placement:
+        preferences:
+          - spread: node.hostname
       restart_policy:
         condition: any
 
@@ -63,6 +147,11 @@ services:
       SPRING_PROFILES_ACTIVE: docker
       POSTGRES_DB: authdb
       POSTGRES_USER: auth
+      # los 3 nodos del cluster: el driver JDBC prueba cada uno y se queda
+      # con el que responda como primario (ver application-docker.yml). Sin
+      # esto el backend seguiria intentando conectar a un solo host fijo,
+      # que puede haber dejado de ser el primario tras un failover.
+      POSTGRES_HOSTS: postgres-1:5432,postgres-2:5432,postgres-3:5432
     secrets:
       - jwt_secret
       - postgres_password
@@ -106,7 +195,9 @@ networks:
     driver: overlay
 
 volumes:
-  pgdata:
+  pgdata1:
+  pgdata2:
+  pgdata3:
 
 secrets:
   # creados por scripts/deploy.sh antes del "stack deploy" (docker secret
@@ -116,4 +207,10 @@ secrets:
   jwt_secret:
     external: true
   postgres_password:
+    external: true
+  # nuevos en la Fase 4: superusuario de Postgres y usuario interno de
+  # repmgr para la replicacion/eleccion de lider.
+  postgres_superuser_password:
+    external: true
+  repmgr_password:
     external: true

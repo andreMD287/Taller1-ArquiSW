@@ -1,8 +1,17 @@
 # Perfil docker: mismo artefacto, solo cambian variables de entorno/red.
-# El host "postgres" es el nombre del servicio en docker-compose (DNS interno de Compose).
+#
+# POSTGRES_HOSTS acepta uno o varios "host:puerto" separados por coma. En
+# docker-compose.yml (un solo Postgres) el default "postgres:5432" alcanza.
+# En stack.yml (Fase 4: cluster con repmgr) el backend recibe los 3 nodos
+# -postgres-1:5432,postgres-2:5432,postgres-3:5432- y el driver JDBC hace el
+# resto: prueba cada host, se queda con el que responda pg_is_in_recovery()
+# = false (targetServerType=primary), y sigue al primario cuando repmgr
+# promueve un standby. Sin esto, el backend quedaria pegado al host que
+# resultara ser el primario en el momento del arranque, y un failover de
+# Postgres lo dejaria escribiendo contra un standby de solo lectura.
 spring:
   datasource:
-    url: jdbc:postgresql://postgres:5432/${POSTGRES_DB:authdb}
+    url: jdbc:postgresql://${POSTGRES_HOSTS:postgres:5432}/${POSTGRES_DB:authdb}?targetServerType=primary
     username: ${POSTGRES_USER:auth}
     password: ${POSTGRES_PASSWORD:auth}
 
