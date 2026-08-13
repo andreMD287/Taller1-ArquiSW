@@ -96,15 +96,23 @@ app:
   lockout:
     max-attempts: 5
     lockout-seconds: 60
-  session:
-    ttl-seconds: 1800
-    # intervalo de la tarea @Scheduled que purga sesiones expiradas: una tabla
-    # que crece sin cota es una falta latente que degrada el servicio con el tiempo.
-    purge-interval-ms: 60000
+  jwt:
+    # vacio a proposito: TokenService decide que hacer segun el perfil activo
+    # (ver TokenService.resolveSecret). En el perfil "docker" es obligatorio.
+    secret: ${JWT_SECRET:}
+    # TTL corto a proposito (Fase 1): limita la ventana en la que un JWT
+    # robado sigue siendo valido, ya que no se puede revocar antes de expirar.
+    access-ttl-seconds: ${JWT_TTL_SECONDS:900}
+    # 7 dias: el refresh token si es revocable (vive en BD), asi que puede
+    # tener una vida mucho mas larga sin el mismo riesgo.
+    refresh-ttl-seconds: ${JWT_REFRESH_TTL_SECONDS:604800}
+    # la purga de refresh tokens ya NO esta en el camino critico de ninguna
+    # peticion (a diferencia de la purga de sesiones que existia antes), asi
+    # que puede correr con un intervalo relajado.
+    purge-interval-ms: 3600000
 
 # Feature toggles: desacoplan el despliegue del release (Cap. 5).
 features:
-  session-cache: true
   new-dashboard: false
 
 node:

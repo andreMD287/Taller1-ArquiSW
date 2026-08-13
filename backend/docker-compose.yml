@@ -29,6 +29,11 @@ services:
       POSTGRES_DB: authdb
       POSTGRES_USER: auth
       POSTGRES_PASSWORD: auth
+      # default de conveniencia para que "docker compose up" siga siendo un
+      # solo comando para el evaluador; exporta JWT_SECRET antes de levantar
+      # si necesitas un secreto propio. En Swarm (Fase 2) esto se reemplaza
+      # por un docker secret real, nunca por una variable de entorno plana.
+      JWT_SECRET: ${JWT_SECRET:-taller-arquisw-dev-secret-cambiar-en-produccion-32bytes}
     ports:
       # puerto directo (sin pasar por nginx) para que los scripts de
       # despliegue puedan consultar el readiness de ESTE nodo puntualmente.
@@ -49,6 +54,7 @@ services:
       POSTGRES_DB: authdb
       POSTGRES_USER: auth
       POSTGRES_PASSWORD: auth
+      JWT_SECRET: ${JWT_SECRET:-taller-arquisw-dev-secret-cambiar-en-produccion-32bytes}
     ports:
       - "8082:8080"
     depends_on:

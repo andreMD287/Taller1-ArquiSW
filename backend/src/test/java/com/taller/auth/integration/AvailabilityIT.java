@@ -1,9 +1,9 @@
 package com.taller.auth.integration;
 
 import com.taller.auth.dto.LoginRequest;
-import com.taller.auth.dto.LoginResponse;
 import com.taller.auth.dto.RegisterRequest;
 import com.taller.auth.dto.RegisterResponse;
+import com.taller.auth.dto.TokenResponse;
 import com.taller.auth.dto.ValidateRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -100,8 +100,8 @@ class AvailabilityIT {
         assertThat(bloqueada.getBody()).contains("\"code\":\"account_locked\"");
 
         // ESC-D5: el bloqueo de UNA cuenta no debe degradar el servicio para el resto.
-        ResponseEntity<LoginResponse> sanaSigueFuncionando = rest.postForEntity(
-                "/api/auth/login", new LoginRequest(inocente, "password123"), LoginResponse.class);
+        ResponseEntity<TokenResponse> sanaSigueFuncionando = rest.postForEntity(
+                "/api/auth/login", new LoginRequest(inocente, "password123"), TokenResponse.class);
         assertThat(sanaSigueFuncionando.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 

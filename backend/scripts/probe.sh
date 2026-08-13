@@ -32,7 +32,7 @@ for attempt in 1 2 3 4 5; do
     TOKEN=$(curl -s -X POST "$BASE_URL/api/auth/login" \
         -H "Content-Type: application/json" \
         -d "{\"username\":\"$PROBE_USER\",\"password\":\"$PROBE_PASS\"}" \
-        | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+        | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
     [ -n "$TOKEN" ] && break
     echo "esperando a que el sistema arranque sano (intento $attempt)..."
     sleep 2

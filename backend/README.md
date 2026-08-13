@@ -60,10 +60,11 @@ Todos bajo `/api/auth`, salvo diagnóstico y salud:
 | Método | Ruta | Body | Respuesta |
 |---|---|---|---|
 | POST | `/api/auth/register` | `{username, password}` | 201 `{username}` |
-| POST | `/api/auth/login` | `{username, password}` | 200 `{token, username, expiresAt}` |
-| POST | `/api/auth/validate` | `{token}` | 200 `{username, expiresAt, degraded}` |
-| POST | `/api/auth/logout` | `{token}` | 204 |
-| GET | `/api/diagnostics` | — | 200: estado del circuit breaker, sesiones en caché, política de bloqueo, feature toggles |
+| POST | `/api/auth/login` | `{username, password}` | 200 `{accessToken, refreshToken, username, accessTokenExpiresAt, refreshTokenExpiresAt}` |
+| POST | `/api/auth/refresh` | `{refreshToken}` | 200: mismo formato que `/login` (rota el refresh token) |
+| POST | `/api/auth/validate` | `{token}` (access token) | 200 `{username, expiresAt}` — verificación en memoria, nunca toca la BD |
+| POST | `/api/auth/logout` | `{refreshToken}` | 200 `{revoked:true}` o 202 `{revoked:false, note}` si la BD no responde |
+| GET | `/api/diagnostics` | — | 200: estado del circuit breaker, política de bloqueo, feature toggles |
 | GET | `/actuator/health/liveness` | — | ¿el proceso sigue vivo? **nunca** consulta Postgres |
 | GET | `/actuator/health/readiness` | — | ¿puede recibir tráfico? incluye el estado del tier de datos |
 | GET | `/actuator/metrics`, `/actuator/prometheus` | — | métricas (incluye `errors.<kind>`) |
@@ -82,14 +83,32 @@ códigos.
 | `POSTGRES_USER` | `auth` (docker) | Usuario de conexión a Postgres |
 | `POSTGRES_PASSWORD` | `auth` (docker) | Password de conexión a Postgres |
 | `SPRING_PROFILES_ACTIVE` | — | `docker` en compose, `test` para tests/desarrollo local con H2 |
+| `JWT_SECRET` | — (ver abajo) | Clave HMAC-SHA256 para firmar/verificar el access token. **Obligatoria** en el perfil `docker`: sin ella la app se niega a arrancar. `docker-compose.yml` trae un default de conveniencia solo para que el evaluador no tenga que configurar nada; en cualquier despliegue real, expórtala antes de levantar el stack. Mínimo 32 bytes. |
+| `JWT_TTL_SECONDS` | `900` (15 min) | TTL del access token. Corto a propósito: acota la ventana de un token robado, dado que un JWT no se puede revocar antes de expirar. |
+| `JWT_REFRESH_TTL_SECONDS` | `604800` (7 días) | TTL del refresh token, que sí es revocable vía `/logout` porque vive en la BD. |
 
 Feature toggles (por configuración, no por variable de entorno directa, pero
 sobreescribibles igual que cualquier propiedad Spring):
 
 | Propiedad | Default | Efecto |
 |---|---|---|
-| `features.session-cache` | `true` | Habilita la caché local de sesiones (Graceful Degradation) |
 | `features.new-dashboard` | `false` | Reservado para demostrar activación sin recompilar |
+
+## Sesiones sin estado (JWT)
+
+`validate` ya no consulta Postgres: el access token es un JWT firmado
+(HMAC-SHA256) y se verifica enteramente en memoria (firma + expiración). Esto
+saca al tier de datos del camino crítico del ~95% de las peticiones (todo lo
+que no es `/login` o `/refresh`). El refresh token, en cambio, es opaco, de
+vida larga y sí se persiste: es la única pieza revocable, y solo se usa en el
+5% del tráfico restante. Con `docker compose stop postgres`, `/api/auth/validate`
+con un token vigente sigue respondiendo 200 (ver `StatelessAccessTokenIT`).
+
+**Trade-off aceptado:** un JWT no se puede revocar antes de expirar sin volver
+a introducir estado compartido entre réplicas (una lista de revocación en
+Redis reintroduce el mismo problema con otro nombre). Se acepta una ventana de
+revocación de hasta `JWT_TTL_SECONDS` (15 min por defecto) a cambio de esa
+independencia del tier de datos.
 
 ## Scripts (`scripts/`)
 

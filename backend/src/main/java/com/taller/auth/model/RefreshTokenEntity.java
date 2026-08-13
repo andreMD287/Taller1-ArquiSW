@@ -10,16 +10,15 @@ import jakarta.persistence.Table;
 import java.time.Instant;
 
 /**
- * Sesion persistida en el tier de datos. El username va denormalizado junto
- * al userId para que "validate" pueda resolverse con una sola fila, sin join,
- * cuando se sirve desde la cache local en modo degradado.
- *
- * createdAt / expiresAt son el timestamp de la tactica "Timestamp" (Cap. 4):
- * permiten detectar estado obsoleto sin depender de un reloj externo.
+ * Refresh token persistido: es la unica parte del ciclo de sesion que sigue
+ * viviendo en el tier de datos. El token de acceso (JWT) NO se persiste, se
+ * verifica en memoria (ver TokenService); este si, porque debe sobrevivir un
+ * reinicio de nodo y ser revocable en logout (Cap. 4: el JWT por si solo no
+ * se puede revocar antes de expirar).
  */
 @Entity
-@Table(name = "sessions")
-public class SessionEntity {
+@Table(name = "refresh_tokens")
+public class RefreshTokenEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -40,11 +39,11 @@ public class SessionEntity {
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 
-    protected SessionEntity() {
+    protected RefreshTokenEntity() {
         // requerido por JPA
     }
 
-    public SessionEntity(String token, Long userId, String username, Instant createdAt, Instant expiresAt) {
+    public RefreshTokenEntity(String token, Long userId, String username, Instant createdAt, Instant expiresAt) {
         this.token = token;
         this.userId = userId;
         this.username = username;

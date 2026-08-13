@@ -1,9 +1,11 @@
 package com.taller.auth.integration;
 
 import com.taller.auth.dto.LoginRequest;
-import com.taller.auth.dto.LoginResponse;
+import com.taller.auth.dto.LogoutResponse;
+import com.taller.auth.dto.RefreshTokenRequest;
 import com.taller.auth.dto.RegisterRequest;
 import com.taller.auth.dto.RegisterResponse;
+import com.taller.auth.dto.TokenResponse;
 import com.taller.auth.dto.ValidateRequest;
 import com.taller.auth.dto.ValidateResponse;
 import org.junit.jupiter.api.Test;
@@ -30,6 +32,12 @@ class AuthControllerIT {
 
     private String uniqueUsername(String prefix) {
         return prefix + System.nanoTime();
+    }
+
+    private TokenResponse registerAndLogin(String username) {
+        rest.postForEntity("/api/auth/register", new RegisterRequest(username, "password123"), RegisterResponse.class);
+        return rest.postForEntity(
+                "/api/auth/login", new LoginRequest(username, "password123"), TokenResponse.class).getBody();
     }
 
     @Test
@@ -65,47 +73,86 @@ class AuthControllerIT {
     }
 
     @Test
-    void loginConCredencialesValidasDevuelveUnToken() {
+    void loginConCredencialesValidasDevuelveUnParDeTokens() {
         String username = uniqueUsername("login");
         rest.postForEntity("/api/auth/register", new RegisterRequest(username, "password123"), RegisterResponse.class);
 
-        ResponseEntity<LoginResponse> response = rest.postForEntity(
-                "/api/auth/login", new LoginRequest(username, "password123"), LoginResponse.class);
+        ResponseEntity<TokenResponse> response = rest.postForEntity(
+                "/api/auth/login", new LoginRequest(username, "password123"), TokenResponse.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody().token()).isNotBlank();
+        assertThat(response.getBody().accessToken()).isNotBlank();
+        assertThat(response.getBody().refreshToken()).isNotBlank();
         assertThat(response.getBody().username()).isEqualTo(username);
     }
 
     @Test
-    void validateConUnTokenValidoLoConfirmaSinDegradacion() {
+    void validateConUnAccessTokenValidoLoConfirma() {
         String username = uniqueUsername("val");
-        rest.postForEntity("/api/auth/register", new RegisterRequest(username, "password123"), RegisterResponse.class);
-        LoginResponse login = rest.postForEntity(
-                "/api/auth/login", new LoginRequest(username, "password123"), LoginResponse.class).getBody();
+        TokenResponse login = registerAndLogin(username);
 
         ResponseEntity<ValidateResponse> response = rest.postForEntity(
-                "/api/auth/validate", new ValidateRequest(login.token()), ValidateResponse.class);
+                "/api/auth/validate", new ValidateRequest(login.accessToken()), ValidateResponse.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody().username()).isEqualTo(username);
-        assertThat(response.getBody().degraded()).isFalse();
     }
 
     @Test
-    void logoutInvalidaElTokenYUnaValidacionPosteriorFalla() {
+    void refreshRotaElParDeTokensYElAccessTokenNuevoValida() {
+        String username = uniqueUsername("ref");
+        TokenResponse login = registerAndLogin(username);
+
+        ResponseEntity<TokenResponse> refreshed = rest.postForEntity(
+                "/api/auth/refresh", new RefreshTokenRequest(login.refreshToken()), TokenResponse.class);
+
+        assertThat(refreshed.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(refreshed.getBody().refreshToken()).isNotEqualTo(login.refreshToken());
+
+        ResponseEntity<ValidateResponse> validated = rest.postForEntity(
+                "/api/auth/validate", new ValidateRequest(refreshed.getBody().accessToken()), ValidateResponse.class);
+        assertThat(validated.getStatusCode()).isEqualTo(HttpStatus.OK);
+    }
+
+    @Test
+    void refreshConElTokenYaRotadoEsRechazado() {
+        String username = uniqueUsername("rot");
+        TokenResponse login = registerAndLogin(username);
+        rest.postForEntity("/api/auth/refresh", new RefreshTokenRequest(login.refreshToken()), TokenResponse.class);
+
+        ResponseEntity<String> segundoUso = rest.postForEntity(
+                "/api/auth/refresh", new RefreshTokenRequest(login.refreshToken()), String.class);
+
+        assertThat(segundoUso.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void logoutRevocaElRefreshTokenYUnRefreshPosteriorFalla() {
         String username = uniqueUsername("out");
-        rest.postForEntity("/api/auth/register", new RegisterRequest(username, "password123"), RegisterResponse.class);
-        LoginResponse login = rest.postForEntity(
-                "/api/auth/login", new LoginRequest(username, "password123"), LoginResponse.class).getBody();
+        TokenResponse login = registerAndLogin(username);
 
-        ResponseEntity<Void> logoutResponse = rest.postForEntity(
-                "/api/auth/logout", new ValidateRequest(login.token()), Void.class);
-        assertThat(logoutResponse.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        ResponseEntity<LogoutResponse> logoutResponse = rest.postForEntity(
+                "/api/auth/logout", new RefreshTokenRequest(login.refreshToken()), LogoutResponse.class);
+        assertThat(logoutResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(logoutResponse.getBody().revoked()).isTrue();
 
-        ResponseEntity<String> validateResponse = rest.postForEntity(
-                "/api/auth/validate", new ValidateRequest(login.token()), String.class);
-        assertThat(validateResponse.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        ResponseEntity<String> refreshPosterior = rest.postForEntity(
+                "/api/auth/refresh", new RefreshTokenRequest(login.refreshToken()), String.class);
+        assertThat(refreshPosterior.getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void logoutNoInvalidaElAccessTokenTodaviaVigente() {
+        // trade-off documentado: el access token sigue siendo valido hasta que
+        // expira por su cuenta, revocar el refresh token no lo afecta.
+        String username = uniqueUsername("stillvalid");
+        TokenResponse login = registerAndLogin(username);
+        rest.postForEntity("/api/auth/logout", new RefreshTokenRequest(login.refreshToken()), LogoutResponse.class);
+
+        ResponseEntity<ValidateResponse> response = rest.postForEntity(
+                "/api/auth/validate", new ValidateRequest(login.accessToken()), ValidateResponse.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
     }
 
     @Test
@@ -115,7 +162,6 @@ class AuthControllerIT {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getBody())
                 .contains("circuitBreakerState")
-                .contains("cachedSessions")
                 .contains("lockoutPolicy")
                 .contains("features");
     }

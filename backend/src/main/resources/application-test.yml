@@ -19,12 +19,15 @@ app:
   lockout:
     max-attempts: 5
     lockout-seconds: 60
-  session:
-    ttl-seconds: 1800
-    purge-interval-ms: 60000
+  jwt:
+    # fijo y determinista para que los tests no dependan de variables de
+    # entorno; 48 bytes ASCII, por encima del minimo de 32 que exige HS256.
+    secret: test-secret-key-for-jwt-signing-only-not-for-prod-use
+    access-ttl-seconds: 900
+    refresh-ttl-seconds: 604800
+    purge-interval-ms: 3600000
 
 features:
-  session-cache: true
   new-dashboard: false
 
 logging:

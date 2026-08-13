@@ -1,10 +1,9 @@
 package com.taller.auth.unit;
 
-import com.taller.auth.dto.LoginResponse;
+import com.taller.auth.dto.TokenResponse;
 import com.taller.auth.exception.AccountLockedException;
 import com.taller.auth.exception.InvalidCredentialsException;
 import com.taller.auth.exception.UserAlreadyExistsException;
-import com.taller.auth.model.SessionEntity;
 import com.taller.auth.model.User;
 import com.taller.auth.repository.UserRepository;
 import com.taller.auth.service.AuthService;
@@ -81,22 +80,24 @@ class AuthServiceTest {
     }
 
     @Test
-    void loginConCredencialesCorrectasCreaUnaSesionYLimpiaElContadorDeFallos() {
+    void loginConCredencialesCorrectasEmiteUnParDeTokensYLimpiaElContadorDeFallos() {
         User user = new User("alice", passwordEncoder.encode("password123"));
         user.setFailedAttempts(3);
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
-        SessionEntity session = new SessionEntity("tok", 1L, "alice", Instant.now(), Instant.now().plusSeconds(1800));
-        when(tokenService.createSession(user)).thenReturn(session);
+        TokenService.TokenPair pair = new TokenService.TokenPair("jwt-access", "opaque-refresh", "alice",
+                Instant.now().plusSeconds(900), Instant.now().plusSeconds(604800));
+        when(tokenService.issue(user)).thenReturn(pair);
 
-        LoginResponse response = authService.login("alice", "password123");
+        TokenResponse response = authService.login("alice", "password123");
 
-        assertThat(response.token()).isEqualTo("tok");
+        assertThat(response.accessToken()).isEqualTo("jwt-access");
+        assertThat(response.refreshToken()).isEqualTo("opaque-refresh");
         assertThat(user.getFailedAttempts()).isZero();
         verify(userRepository).save(user);
     }
 
     @Test
-    void loginConPasswordIncorrectaRegistraElFalloYNoCreaSesion() {
+    void loginConPasswordIncorrectaRegistraElFalloYNoEmiteTokens() {
         User user = new User("alice", passwordEncoder.encode("password123"));
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(user));
 
@@ -104,7 +105,7 @@ class AuthServiceTest {
                 .isInstanceOf(InvalidCredentialsException.class);
 
         assertThat(user.getFailedAttempts()).isEqualTo(1);
-        verify(tokenService, never()).createSession(any());
+        verify(tokenService, never()).issue(any());
     }
 
     @Test
@@ -117,7 +118,7 @@ class AuthServiceTest {
         // mismo tipo de excepcion que una password incorrecta: el cliente no
         // puede distinguir "no existe" de "existe pero la clave esta mal".
         verify(userRepository, times(0)).save(any());
-        verify(tokenService, never()).createSession(any());
+        verify(tokenService, never()).issue(any());
     }
 
     @Test
@@ -133,19 +134,40 @@ class AuthServiceTest {
         assertThatThrownBy(() -> authService.login("alice", "password123"))
                 .isInstanceOf(AccountLockedException.class);
 
-        verify(tokenService, never()).createSession(any());
+        verify(tokenService, never()).issue(any());
     }
 
     @Test
-    void validateYLogoutDelegantEnTokenService() {
-        SessionEntity session = new SessionEntity("tok", 1L, "alice", Instant.now(), Instant.now().plusSeconds(1800));
-        when(tokenService.validate("tok"))
-                .thenReturn(new TokenService.ValidateResult("alice", session.getExpiresAt(), false));
+    void validateDelegaEnTokenServiceSinTocarElRepositorioDeUsuarios() {
+        when(tokenService.validateAccessToken("jwt"))
+                .thenReturn(new TokenService.AccessClaims("alice", Instant.now().plusSeconds(900)));
 
-        authService.validate("tok");
-        authService.logout("tok");
+        authService.validate("jwt");
 
-        verify(tokenService).validate("tok");
-        verify(tokenService).invalidate("tok");
+        verify(tokenService).validateAccessToken("jwt");
+        verify(userRepository, never()).findByUsername(any());
+    }
+
+    @Test
+    void logoutDelegaLaRevocacionEnTokenService() {
+        when(tokenService.revokeRefreshToken("refresh-tok"))
+                .thenReturn(new TokenService.RevokeResult(true, null));
+
+        var result = authService.logout("refresh-tok");
+
+        assertThat(result.revoked()).isTrue();
+        verify(tokenService).revokeRefreshToken("refresh-tok");
+    }
+
+    @Test
+    void refreshDelegaLaRotacionEnTokenService() {
+        TokenService.TokenPair pair = new TokenService.TokenPair("jwt-nuevo", "refresh-nuevo", "alice",
+                Instant.now().plusSeconds(900), Instant.now().plusSeconds(604800));
+        when(tokenService.refresh("refresh-viejo")).thenReturn(pair);
+
+        TokenResponse response = authService.refresh("refresh-viejo");
+
+        assertThat(response.accessToken()).isEqualTo("jwt-nuevo");
+        assertThat(response.refreshToken()).isEqualTo("refresh-nuevo");
     }
 }

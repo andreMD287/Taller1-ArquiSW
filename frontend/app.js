@@ -33,7 +33,11 @@ loginForm.addEventListener("submit", async function (event) {
 
             localStorage.setItem(
                 "authToken",
-                data.token
+                data.accessToken
+            );
+            localStorage.setItem(
+                "refreshToken",
+                data.refreshToken
             );
 
             message.textContent =

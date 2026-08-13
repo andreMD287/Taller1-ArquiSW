@@ -2,7 +2,8 @@ package com.taller.auth.dto;
 
 import java.time.Instant;
 
-// degraded=true significa que la respuesta vino de la cache local del nodo
-// porque el tier de datos no estaba disponible (Graceful Degradation, Cap. 4).
-public record ValidateResponse(String username, Instant expiresAt, boolean degraded) {
+// Ya no existe un modo "degraded": validate se verifica enteramente en
+// memoria (ver TokenService), asi que nunca depende de que el tier de datos
+// este arriba o abajo.
+public record ValidateResponse(String username, Instant expiresAt) {
 }

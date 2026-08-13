@@ -1,13 +1,13 @@
 package com.taller.auth.service;
 
-import com.taller.auth.dto.LoginResponse;
+import com.taller.auth.dto.LogoutResponse;
+import com.taller.auth.dto.TokenResponse;
 import com.taller.auth.dto.ValidateResponse;
 import com.taller.auth.exception.AccountLockedException;
 import com.taller.auth.exception.AppException;
 import com.taller.auth.exception.DataUnavailableException;
 import com.taller.auth.exception.InvalidCredentialsException;
 import com.taller.auth.exception.UserAlreadyExistsException;
-import com.taller.auth.model.SessionEntity;
 import com.taller.auth.model.User;
 import com.taller.auth.repository.UserRepository;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
@@ -78,7 +78,7 @@ public class AuthService {
     // al lanzar la excepcion, y la cuenta nunca llega a bloquearse (ESC-D5 roto).
     @CircuitBreaker(name = "dataTier", fallbackMethod = "loginFallback")
     @Transactional(noRollbackFor = AppException.class)
-    public LoginResponse login(String username, String rawPassword) {
+    public TokenResponse login(String username, String rawPassword) {
         User user = userRepository.findByUsername(username).orElse(null);
         Instant now = Instant.now();
 
@@ -98,12 +98,12 @@ public class AuthService {
 
         lockoutPolicy.registerSuccess(user);
         userRepository.save(user);
-        SessionEntity session = tokenService.createSession(user);
-        return new LoginResponse(session.getToken(), user.getUsername(), session.getExpiresAt());
+        TokenService.TokenPair pair = tokenService.issue(user);
+        return toResponse(pair);
     }
 
     @SuppressWarnings("unused")
-    private LoginResponse loginFallback(String username, String rawPassword, Throwable t) {
+    private TokenResponse loginFallback(String username, String rawPassword, Throwable t) {
         // misma razon que en registerFallback: credenciales invalidas o cuenta
         // bloqueada (EXPECTED) no son una caida del tier de datos.
         if (t instanceof AppException appException) {
@@ -112,12 +112,25 @@ public class AuthService {
         throw new DataUnavailableException(t);
     }
 
+    // Sin @CircuitBreaker: validar un JWT es una verificacion de firma en
+    // memoria (TokenService.validateAccessToken), nunca toca el tier de
+    // datos. Es exactamente la garantia que pide la Fase 1.
     public ValidateResponse validate(String token) {
-        TokenService.ValidateResult result = tokenService.validate(token);
-        return new ValidateResponse(result.username(), result.expiresAt(), result.degraded());
+        TokenService.AccessClaims claims = tokenService.validateAccessToken(token);
+        return new ValidateResponse(claims.username(), claims.expiresAt());
     }
 
-    public void logout(String token) {
-        tokenService.invalidate(token);
+    public TokenResponse refresh(String refreshToken) {
+        return toResponse(tokenService.refresh(refreshToken));
+    }
+
+    public LogoutResponse logout(String refreshToken) {
+        TokenService.RevokeResult result = tokenService.revokeRefreshToken(refreshToken);
+        return new LogoutResponse(result.revoked(), result.note());
+    }
+
+    private static TokenResponse toResponse(TokenService.TokenPair pair) {
+        return new TokenResponse(pair.accessToken(), pair.refreshToken(), pair.username(),
+                pair.accessExpiresAt(), pair.refreshExpiresAt());
     }
 }
