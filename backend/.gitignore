@@ -4,8 +4,8 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
-### Sonda de disponibilidad ###
-scripts/probe_*.csv
+### Sonda de disponibilidad y experimentos de caos: salida cruda regenerable ###
+results/
 
 ### STS ###
 .apt_generated

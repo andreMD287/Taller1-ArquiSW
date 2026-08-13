@@ -139,14 +139,34 @@ Para el stack en Swarm (`stack.yml`):
   healthcheck de liveness falla). Imprime el cycle time total.
 - `rollback.sh` — `docker service rollback auth_backend`: vuelve a la última
   versión estable en un comando, sin reetiquetar imágenes a mano.
+- `probe.sh [segundos]` — sonda de disponibilidad a través del routing mesh
+  de Swarm (`localhost:8080`). Mezcla realista de tráfico (5% `/login`, 95%
+  `/validate`, configurable con `LOGIN_RATIO`); clasifica cada muestra con la
+  taxonomía del proyecto (`FaultKind`) — un error `EXPECTED` no cuenta como
+  fallo, solo `FAULT`/`FAILURE` y la ausencia total de respuesta. Imprime
+  disponibilidad global y por operación, ventanas de caída con su duración,
+  MTBF/MTTR observados y percentiles de latencia; deja el CSV crudo en
+  `results/probe-<timestamp>.csv`.
+- `chaos.sh` — mata una tarea de `auth_backend` (Swarm la reprograma sola,
+  sin intervención manual) y luego apaga/revive Postgres escalando
+  `auth_postgres` a 0 y de vuelta a 1. Pensado para correr en paralelo con
+  `probe.sh`; deja un log con marcas de tiempo en `results/chaos-<timestamp>.log`
+  para correlacionar las dos corridas.
+- `availability-model.py` — el modelo analítico (bloques serie/paralelo) que
+  produce el número que se entrega: 99.99% de disponibilidad son ~52.6
+  min/año de caída, algo que no se puede demostrar por observación directa en
+  una demo corta. Toma como entrada el MTTR medido (a mano, o directo de un
+  CSV de `probe.sh` con `--probe-csv`), lo combina con el número de réplicas
+  y la mezcla de tráfico, y proyecta la disponibilidad anual. Cada parámetro
+  que no viene medido es una asunción explícita y documentada en el propio
+  script (`DEFAULTS_DOC`), nunca un número puesto a ojo. Solo librería
+  estándar de Python 3.
 
 Para el `docker-compose.yml` de desarrollo local:
 
-- `probe.sh [segundos]` — sonda de disponibilidad a través de nginx; calcula
-  disponibilidad observada, MTBF/MTTR y percentiles de latencia, y deja un
-  CSV crudo.
-- `chaos-kill.sh` — mata `backend-1`, lo revive, y luego apaga Postgres, para
-  correr en paralelo con `probe.sh` durante la demo.
+- `chaos-kill.sh` — mata `backend-1`, lo revive, y luego apaga Postgres (vía
+  `docker compose`), para correr en paralelo con `probe.sh` apuntando a
+  `localhost:8080` igual que en Swarm.
 
 ## Distinción de examen: liveness vs. readiness
 
