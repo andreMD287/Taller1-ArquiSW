@@ -1,0 +1,10 @@
+[1786587556] chaos-db-failover.sh iniciado (stack=auth)
+[1786587556] buscando el primario actual entre postgres-1, postgres-2, postgres-3...
+[1786587557]   postgres-1 (7b9717876f43): pg_is_in_recovery=f
+[1786587558]   postgres-2 (7587088708b9): pg_is_in_recovery=t
+[1786587559]   postgres-3 (45a2e67dd95e): pg_is_in_recovery=t
+[1786587560] primario actual: postgres-1 (7b9717876f43)
+[1786587560] matando postgres-1 de un kill -9 (simula la caida abrupta del primario)...
+[1786587561] kill enviado
+[1786587561] esperando a que repmgrd promueva a uno de: postgres-2 postgres-3...
+[1786587682] TIMEOUT: nadie fue promovido a primario en 120s. Revisa 'docker service logs auth_postgres-2' / postgres-3.

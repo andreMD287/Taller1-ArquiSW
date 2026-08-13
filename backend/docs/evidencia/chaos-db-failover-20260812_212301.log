@@ -1,0 +1,14 @@
+[1786587781] chaos-db-failover.sh iniciado (stack=auth)
+[1786587781] buscando el primario actual entre postgres-1, postgres-2, postgres-3...
+[1786587782]   postgres-1 (02550e9df351): pg_is_in_recovery=f
+[1786587783]   postgres-2 (7587088708b9): pg_is_in_recovery=t
+[1786587784]   postgres-3 (45a2e67dd95e): pg_is_in_recovery=t
+[1786587784] primario actual: postgres-1 (02550e9df351)
+[1786587784] escalando auth_postgres-1 a 0 replicas (simula la caida sostenida del primario)...
+[1786587785] primario apagado
+[1786587785] esperando a que repmgrd promueva a uno de: postgres-2 postgres-3...
+[1786587813] postgres-2 promovido a primario. MTTR de failover: 29s
+[1786587813] el backend deberia seguir al nuevo primario solo (targetServerType=primary en el JDBC URL), sin reiniciarlo.
+[1786587813] reviviendo postgres-1 (vuelve como standby: REPMGR_PRIMARY_HOST solo importa en el bootstrap inicial)...
+[1786587813] siguiente paso: alimenta este numero al modelo -> python3 scripts/availability-model.py --db-mttr-seconds 29
+[1786587813] log completo: /c/Javeriana/9no semestre/Arqui SW/Taller 1/Taller1-ArquiSW/backend/scripts/../results/chaos-db-failover-20260812_212301.log

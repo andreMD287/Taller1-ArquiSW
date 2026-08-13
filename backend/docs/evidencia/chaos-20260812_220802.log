@@ -1,0 +1,14 @@
+[1786590482] chaos.sh iniciado (stack=auth, step_wait=10s)
+[1786590482] esperando 10s para que probe.sh tome una linea base sana...
+[1786590493] matando una tarea de auth_backend (simula la caida de una replica)...
+[1786590494] tarea 330055b54add matada de un kill -9; Swarm deberia reemplazarla sola
+[1786590522] replicas de backend de vuelta a 3/3 (reprogramadas por Swarm, sin intervencion manual)
+[1786590532] deteniendo el tier de datos completo (postgres-1, postgres-2, postgres-3)...
+[1786590543] reviviendo el tier de datos...
+[1786590557] postgres-1 de vuelta arriba
+[1786590573] postgres-2 de vuelta arriba
+[1786590573] postgres-3 de vuelta arriba
+[1786590573] nota: los 3 nodos vuelven con su volumen intacto (todos se apagaron juntos, ninguno
+[1786590573] quedo desactualizado respecto a otro), asi que repmgr puede re-formar el cluster sin
+[1786590574] el riesgo de split-brain que si existe al revivir solo un EX-primario (ver chaos-db-failover.sh).
+[1786590574] experimento de caos terminado. Log: /c/Javeriana/9no semestre/Arqui SW/Taller 1/Taller1-ArquiSW/backend/scripts/../results/chaos-20260812_220802.log
