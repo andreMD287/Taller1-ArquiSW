@@ -5,6 +5,9 @@ Arquitectura de Software, sobre *Software Architecture in Practice* (Bass,
 Clements & Kazman, 4.ª ed.), capítulos 3 (escenarios), 4 (disponibilidad) y 5
 (desplegabilidad). El detalle de decisiones, tácticas y mediciones está en
 [`docs/documentacion-arquitectura.md`](docs/documentacion-arquitectura.md).
+Para instrucciones de uso paso a paso (cómo levantar el sistema, usar cada
+endpoint con `curl`, y reproducir los experimentos), ver
+[`GUIA-DE-USO.md`](GUIA-DE-USO.md).
 
 ## Arquitectura en 3 tiers
 

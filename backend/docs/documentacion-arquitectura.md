@@ -3,8 +3,20 @@
 
 **Curso:** Arquitectura de Software
 **Marco de referencia:** Bass, Clements & Kazman, *Software Architecture in Practice*, 4.ª ed. — Capítulos 1, 2, 3, 4 y 5
-**Versión del documento:** 1.0
+**Versión del documento:** 2.0
 **Fecha:** agosto de 2026
+
+> **Nota de versión.** La v1.0 de este documento (sección 11) concluía que el sistema
+> alcanzaba **99.85%** de disponibilidad estimada, un orden de magnitud por debajo del
+> objetivo de 99.99%, y que **no era alcanzable con la infraestructura permitida** en ese
+> momento (RE-5: un solo host, Docker Compose). Esa conclusión ya no es cierta. Cuatro
+> decisiones — sesiones sin estado con JWT, migración a Docker Swarm, eliminación de nginx
+> como balanceador único, y alta disponibilidad de Postgres con `repmgr` — cierran la
+> brecha. La v2.0 documenta esas decisiones, reclasifica RE-5 (dejó de ser una restricción
+> impuesta: ahora es una decisión de arquitectura, ver ADR-09), y reemplaza la sección 11
+> con el modelo y las mediciones reales que demuestran **99.999980%** proyectado. Donde el
+> contraste entre v1.0 y v2.0 es él mismo un hallazgo (secciones 3.2 y 11), se conserva
+> explícitamente en vez de reescribirse en silencio.
 
 ---
 
@@ -33,9 +45,10 @@
 ### 1.1 Propósito
 
 Este documento describe la arquitectura de un sistema de autenticación de usuarios
-construido como ejercicio del taller. No es un manual de uso: es el registro de las
-**decisiones de diseño**, su justificación en términos de atributos de calidad, y la
-evidencia medida de que esas decisiones producen el comportamiento esperado.
+construido como ejercicio del taller. No es un manual de uso — eso es
+[`GUIA-DE-USO.md`](../GUIA-DE-USO.md) — es el registro de las **decisiones de diseño**, su
+justificación en términos de atributos de calidad, y la evidencia medida de que esas
+decisiones producen el comportamiento esperado.
 
 Sigue la definición del Capítulo 1: la arquitectura es *el conjunto de estructuras
 necesarias para razonar sobre el sistema*, compuestas por elementos de software, las
@@ -46,8 +59,9 @@ funcionalidades.
 ### 1.2 Alcance
 
 **Dentro del alcance:** registro de usuarios, autenticación por usuario y contraseña,
-gestión de sesiones con token, cierre de sesión, y las propiedades de disponibilidad y
-desplegabilidad del sistema que provee esas funciones.
+emisión y renovación de sesión mediante un par de tokens (acceso + refresco), validación
+de sesión, cierre de sesión, y las propiedades de disponibilidad y desplegabilidad del
+sistema que provee esas funciones.
 
 **Fuera del alcance:** recuperación de contraseña, autenticación de segundo factor,
 federación de identidad (OAuth/SAML), autorización basada en roles. Se excluyen
@@ -85,12 +99,15 @@ graph LR
 | Usuario final | Poder entrar cuando lo necesita | Disponibilidad, desempeño |
 | Operador | Saber qué se rompió y dónde, rápido | Disponibilidad (MTTR), observabilidad |
 | Desarrollador | Publicar cambios sin miedo y sin ventana nocturna | Desplegabilidad, modificabilidad |
-| Docente / evaluador | Ver la teoría aplicada y medida | Trazabilidad de las decisiones |
+| Evaluador del taller | Levantar el sistema con el mínimo esfuerzo y ver la teoría aplicada y medida | Despliegue sencillo, trazabilidad de las decisiones |
 
 La distinción importa porque, como señala el Capítulo 3, **un atributo de calidad mide la
 utilidad del sistema para un stakeholder concreto**. "Disponibilidad" significa cosas
 distintas para el usuario (poder hacer login) y para el operador (que el nodo caído se
-reemplace solo).
+reemplace solo); y el evaluador introduce una tensión nueva que no estaba en la v1.0 de
+este documento: necesita **alta disponibilidad demostrable** y, a la vez, poder desplegar
+el entregable **sin fricción** en su propia máquina. Esa tensión es exactamente el
+problema que resuelve la sección 3.2 y el ADR-09.
 
 ---
 
@@ -105,21 +122,36 @@ reemplace solo).
 | RF-3 | El sistema valida una sesión existente en cada operación protegida |
 | RF-4 | Un usuario puede cerrar su sesión |
 | RF-5 | El sistema bloquea temporalmente una cuenta tras N intentos fallidos |
+| RF-6 | Un usuario puede renovar su sesión sin volver a enviar usuario/contraseña |
+
+RF-6 es nuevo en esta versión: es el correlato funcional necesario de que el token de
+acceso (RF-3) ahora expira en minutos, no en horas (ver ADR-08). Sin un mecanismo de
+renovación, RF-6 obligaría a re-autenticarse con credenciales cada 15 minutos, lo que
+degradaría la experiencia del usuario para ganar disponibilidad — un intercambio que nadie
+pidió.
 
 ### 3.2 Restricciones
 
-| ID | Restricción | Origen |
-|---|---|---|
-| RE-1 | Arquitectura de **3 tiers** con separación física de procesos | Enunciado del taller |
-| RE-2 | Comunicación entre tiers por **canal remoto** (HTTP/REST y JDBC) | Enunciado del taller |
-| RE-3 | Objetivo de disponibilidad de **99.99 %** | Enunciado del taller |
-| RE-4 | Stack Java 21 / Spring Boot 3.3 / PostgreSQL 16 | Decisión de equipo |
-| RE-5 | Despliegue local con Docker Compose (sin orquestador de producción) | Recursos del taller |
-| RE-6 | Equipo de 3 personas, sesión de trabajo acotada | Contexto del curso |
+| ID | Restricción | Origen | Estado |
+|---|---|---|---|
+| RE-1 | Arquitectura de **3 tiers** con separación física de procesos | Enunciado del taller | Vigente |
+| RE-2 | Comunicación entre tiers por **canal remoto** (HTTP/REST y JDBC) | Enunciado del taller | Vigente |
+| RE-3 | Objetivo de disponibilidad de **99.99 %** | Enunciado del taller | Vigente — **cumplido**, ver sección 11 |
+| RE-4 | Stack Java 21 / Spring Boot 3.3 / PostgreSQL 16 | Decisión de equipo | Vigente, ampliado (JWT, Docker Swarm, repmgr) |
+| RE-5 | ~~Despliegue local con Docker Compose (sin orquestador de producción)~~ | Recursos del taller | **Superada — ver ADR-09** |
+| RE-6 | Equipo de 3 personas, sesión de trabajo acotada | Contexto del curso | Vigente |
 
-RE-5 y RE-6 no son cosméticas: son las que explican por qué el sistema **no alcanza**
-99.99 % real (sección 11) y por qué esa brecha es un hallazgo del trabajo, no un defecto
-oculto.
+**Por qué RE-5 cambió de columna.** En la v1.0, RE-5 era una restricción que **impedía**
+alcanzar 99.99 %: sin un orquestador, no había forma de automatizar la reprogramación de
+un nodo caído ni el balanceo sin un SPOF. La restricción real detrás de RE-5 nunca fue
+"usa Docker Compose" — fue "el evaluador debe poder levantar el sistema sin fricción,
+en su propia máquina, sin depender de infraestructura externa". Docker Swarm cumple esa
+restricción real **igual de bien que Compose** (`docker stack deploy` con dos comandos,
+un solo nodo) y además resuelve la disponibilidad, porque el mismo archivo de despliegue
+funciona en 1 nodo o en N. Por eso RE-5 se reclasifica: de restricción impuesta a
+**decisión de arquitectura documentada en ADR-09**. RE-6 sigue vigente y explica por qué
+la Fase 4 (HA de Postgres) se implementó como MVP con limitaciones documentadas (sección
+14) en vez de una solución de nivel de producción con almacenamiento distribuido.
 
 ### 3.3 Atributos de calidad priorizados
 
@@ -128,7 +160,7 @@ oculto.
 | 1 | **Disponibilidad** | Objeto del Cap. 4 y objetivo explícito del enunciado |
 | 2 | **Desplegabilidad** | Objeto del Cap. 5; además condiciona la disponibilidad, porque los despliegues son una causa mayor de caídas |
 | 3 | Modificabilidad | Habilita las dos anteriores: sin separación de responsabilidades no hay despliegue granular |
-| 4 | Seguridad | Requisito del dominio (contraseñas), tratado como higiene, no como objeto de estudio |
+| 4 | Seguridad | Requisito del dominio (contraseñas, tokens), tratado como higiene, no como objeto de estudio |
 | 5 | Desempeño | Se mide (p95) pero no se optimiza |
 
 ---
@@ -136,7 +168,9 @@ oculto.
 ## 4. Atributos de calidad y escenarios
 
 Los escenarios usan el formato de **seis partes** del Capítulo 3. Un escenario sin *medida
-de respuesta* no es un escenario: es un deseo.
+de respuesta* no es un escenario: es un deseo. Cada escenario indica, entre paréntesis, si
+fue verificado con un experimento real contra el sistema desplegado (sección 12) o si sigue
+siendo una especificación sin evidencia directa.
 
 ### 4.1 Escenarios de disponibilidad
 
@@ -145,33 +179,41 @@ de respuesta* no es un escenario: es un deseo.
 | Parte | Valor |
 |---|---|
 | **Fuente del estímulo** | Interno al sistema: el proceso del backend |
-| **Estímulo** | Falla por caída (*crash*) de una de las dos réplicas |
-| **Artefacto** | Nodo `backend-1` del tier de lógica |
+| **Estímulo** | Falla por caída (*crash*) de una de las tres réplicas |
+| **Artefacto** | Una tarea del servicio `backend` (Swarm) |
 | **Entorno** | Operación normal, bajo carga de peticiones |
-| **Respuesta** | El balanceador detecta el nodo caído y deja de enrutarle tráfico; las peticiones se atienden en la réplica superviviente; se registra el evento |
-| **Medida de respuesta** | **0 peticiones fallidas** observadas por el cliente; detección en ≤ 3 s; sin intervención humana |
+| **Respuesta** | El *routing mesh* de Swarm deja de enrutarle tráfico a la tarea caída; Swarm reprograma una tarea de reemplazo sola; las peticiones se atienden en las réplicas supervivientes |
+| **Medida de respuesta** | **0 peticiones fallidas** observadas por el cliente; reprogramación en **28 s medidos** (E2, sección 12); sin intervención humana |
+| **Verificado** | Sí — E2, dos corridas independientes, 28 s ambas veces |
 
 #### ESC-D2 — Caída del tier de datos
 
 | Parte | Valor |
 |---|---|
-| **Fuente** | Externo al software: proceso de PostgreSQL |
-| **Estímulo** | El tier de datos deja de responder |
-| **Artefacto** | Conexión lógica→datos y funciones que dependen de persistencia |
+| **Fuente** | Externo al software: los procesos de PostgreSQL |
+| **Estímulo** | El tier de datos completo deja de responder |
+| **Artefacto** | Los 3 nodos de Postgres |
 | **Entorno** | Operación normal |
-| **Respuesta** | El circuit breaker se abre tras N fallos; `login` y `register` responden `503` con código `data_unavailable` y mensaje comprensible; **`validate` de sesiones ya emitidas sigue respondiendo** desde caché local marcando `degraded: true`; ningún nodo sano se reinicia |
-| **Medida** | Servicio **parcialmente disponible**: 100 % de éxito en `validate` de sesiones previas; degradación anunciada en ≤ 5 s; recuperación automática ≤ 10 s tras el retorno de la BD |
+| **Respuesta** | `/api/auth/validate` **no se entera**: se verifica en memoria (ADR-08), cero dependencia del tier de datos. `/login` y `/refresh` — las únicas operaciones que tocan la BD — responden `503 data_unavailable` mientras la BD esté abajo; ningún nodo sano se reinicia (`liveness` nunca consulta Postgres, ADR-03) |
+| **Medida** | `validate`: **100 % de disponibilidad** durante la caída (medido, no solo diseñado). `login`: degradado a `FAILURE` mientras dure la caída, recupera solo al volver la BD |
+| **Verificado** | Sí — E4: primera corrida (Fase 3, Postgres de instancia única) capturó 1 fallo real de `login` durante una ventana de 21 s de caída, con `validate` en 100 % durante toda la ventana; segunda corrida (Fase 4, cluster completo) confirmó `validate` en 100 % de nuevo |
+
+Esta es la reescritura más importante de la v1.0: antes, ESC-D2 dependía de una caché
+local con `degraded: true` (ADR-04, ahora superado) para servir `validate` durante la
+caída. Ahora **no hace falta ninguna táctica de degradación**, porque `validate` nunca
+tuvo una dependencia que degradar (ver ADR-08).
 
 #### ESC-D3 — Latencia anómala en el tier de datos
 
 | Parte | Valor |
 |---|---|
 | **Fuente** | Interno: el tier de datos |
-| **Estímulo** | Una consulta tarda más de lo especificado (falta de desempeño que se convierte en falla) |
-| **Artefacto** | Pool de conexiones del tier de lógica |
-| **Entorno** | Operación normal |
-| **Respuesta** | El timeout corta la espera y la convierte en un fallo explícito y acotado; el retry absorbe el caso transitorio; si persiste, abre el circuito |
-| **Medida** | Peor caso acotado: `connection-timeout` de Hikari (1 s) × 2 intentos de Retry + espera entre intentos ≈ **2.1 s teóricos**; verificado empíricamente en ~2.3 s para la primera petición tras la caída (las siguientes bajan a milisegundos en cuanto el circuito abre). Siempre por debajo del `proxy_read_timeout` de nginx (8 s), para que el cliente reciba el 503/degraded del backend y no un 504 de nginx |
+| **Estímulo** | Una consulta tarda más de lo especificado |
+| **Artefacto** | Pool de conexiones del backend hacia el cluster Postgres |
+| **Entorno** | Operación normal, en `/login` o `/refresh` (los únicos que tocan la BD) |
+| **Respuesta** | El timeout de Hikari (1 s) corta la espera; el `Retry` de Resilience4j absorbe el caso transitorio; si persiste, abre el circuito |
+| **Medida** | Peor caso acotado: `connection-timeout` (1 s) × 2 intentos de Retry ≈ **2.1 s teóricos** por operación, y solo afecta al 5 % del tráfico (`login`/`refresh`) — antes afectaba al ~100 % |
+| **Verificado** | Parcial — la configuración se ejecuta en cada corrida (E1, E4), pero no se midió una latencia inyectada artificialmente |
 
 #### ESC-D4 — Excepción no prevista en el código
 
@@ -183,6 +225,7 @@ de respuesta* no es un escenario: es un deseo.
 | **Entorno** | Operación normal |
 | **Respuesta** | El manejador transversal la captura, la clasifica como `FAULT`, la registra con `requestId` e incrementa el contador; el cliente recibe una respuesta homogénea sin traza técnica; el proceso **no** termina |
 | **Medida** | **0 stack traces** expuestos; 100 % de las excepciones registradas con correlación; disponibilidad del proceso no afectada |
+| **Verificado** | Sí — estructuralmente, por diseño del `GlobalExceptionHandler` (sin cambios respecto a v1.0) |
 
 #### ESC-D5 — Ataque de fuerza bruta sobre una cuenta
 
@@ -194,17 +237,31 @@ de respuesta* no es un escenario: es un deseo.
 | **Entorno** | Operación normal |
 | **Respuesta** | Tras 5 intentos la cuenta se bloquea 60 s; el sistema sigue atendiendo al resto de usuarios con normalidad |
 | **Medida** | Degradación del servicio para el resto de usuarios: **0 %**; el evento se clasifica como `EXPECTED`, no computa contra la disponibilidad |
+| **Verificado** | Sí — `AvailabilityIT.unaCuentaBloqueadaPorFuerzaBrutaNoAfectaAOtrosUsuarios` (`./mvnw test`, sección 12.0) |
 
 #### ESC-D6 — Recuperación tras el retorno de un nodo
 
 | Parte | Valor |
 |---|---|
-| **Fuente** | Operador |
-| **Estímulo** | Se reinicia el nodo previamente caído |
-| **Artefacto** | Nodo del tier de lógica |
+| **Fuente** | Swarm (automático) |
+| **Estímulo** | Se reprograma el nodo previamente caído |
+| **Artefacto** | Tarea del tier de lógica |
 | **Entorno** | Recuperación tras falla |
-| **Respuesta** | El nodo arranca, pasa `liveness`, comprueba dependencias en `readiness` y solo entonces el balanceador vuelve a enviarle tráfico |
-| **Medida** | **MTTR ≤ 30 s**; 0 peticiones enrutadas a un nodo que aún no está listo |
+| **Respuesta** | La tarea nueva arranca, pasa el `HEALTHCHECK` (que consulta `liveness`), y solo entonces el *routing mesh* le envía tráfico |
+| **Medida** | **MTTR = 28 s medidos** (E2); 0 peticiones enrutadas a una tarea que aún no está sana |
+| **Verificado** | Sí — mismo experimento que ESC-D1 |
+
+#### ESC-D7 — Caída del primario de Postgres (Fase 4)
+
+| Parte | Valor |
+|---|---|
+| **Fuente del estímulo** | Interno: el proceso de Postgres que actúa como primario |
+| **Estímulo** | El primario del cluster deja de responder de forma sostenida (no un *restart* rápido: ver ADR-11 sobre por qué `docker kill` no dispara este escenario) |
+| **Artefacto** | El nodo primario del cluster repmgr (`postgres-1/2/3`) |
+| **Entorno** | Operación normal |
+| **Respuesta** | `repmgrd`, corriendo en cada standby, detecta la pérdida del primario tras agotar sus reintentos y promueve a uno de los standbys. El backend, con una URL JDBC multi-host (`targetServerType=primary`), reconecta solo al nuevo primario, sin reiniciarse |
+| **Medida** | **MTTR de failover = 29 s medidos**, reproducido en dos corridas independientes (E9). Sin esta fase, el mismo evento exige intervención manual (~1 h, el escenario original del enunciado) |
+| **Verificado** | Sí — E9, dos corridas, 29 s ambas veces; login sin interrupción tras la promoción (verificado con una llamada real a `/api/auth/login` inmediatamente después) |
 
 ### 4.2 Escenarios de desplegabilidad
 
@@ -214,10 +271,11 @@ de respuesta* no es un escenario: es un deseo.
 |---|---|
 | **Fuente** | Desarrollador |
 | **Estímulo** | Solicita desplegar una nueva versión del tier de lógica |
-| **Artefacto** | Las dos réplicas del backend |
+| **Artefacto** | Las 3 réplicas del servicio `backend` |
 | **Entorno** | Producción, con tráfico activo |
-| **Respuesta** | *Rolling upgrade*: se actualiza una réplica, se espera su `readiness` en verde, y solo entonces se actualiza la segunda; apagado ordenado en cada una |
-| **Medida** | **0 peticiones fallidas** durante el despliegue; *cycle time* ≤ 3 min; despliegue ejecutado con **un solo comando** |
+| **Respuesta** | Swarm ejecuta el `update_config` declarado en `stack.yml`: una réplica a la vez, `start-first` (la nueva arranca antes de bajar la vieja), con rollback automático si el `HEALTHCHECK` de `liveness` falla durante la actualización |
+| **Medida** | **0 peticiones fallidas** durante el despliegue (medido con una sonda concurrente, no solo diseñado); *cycle time* de **115 s** medido; despliegue ejecutado con **un solo comando** (`scripts/rolling-upgrade.sh`) |
+| **Verificado** | Sí — E5: 133 muestras (0.3 s de intervalo) durante una actualización real, **0 fallidas**, disponibilidad observada 100 % |
 
 #### ESC-P2 — Reversión de una versión defectuosa
 
@@ -225,10 +283,11 @@ de respuesta* no es un escenario: es un deseo.
 |---|---|
 | **Fuente** | Desarrollador u operador |
 | **Estímulo** | La versión recién desplegada presenta un defecto en producción |
-| **Artefacto** | Tier de lógica |
+| **Artefacto** | Servicio `backend` |
 | **Entorno** | Producción |
-| **Respuesta** | *Rollback* a la imagen etiquetada anterior mediante script |
-| **Medida** | Reversión completa en **≤ 2 min**; sin pérdida de sesiones activas; sin migración inversa de base de datos |
+| **Respuesta** | `docker service rollback`: Swarm ya guarda la especificación anterior del servicio, no hace falta reetiquetar imágenes a mano |
+| **Medida** | Reversión completa en un comando, con la misma garantía de `update_config` (nunca cero réplicas sanas) |
+| **Verificado** | Parcial — el comando se ejecutó y convergió correctamente (Fase 2); no se inyectó una versión defectuosa real para medir el *cycle time* de vuelta |
 
 #### ESC-P3 — Activación de una función sin desplegar
 
@@ -238,8 +297,9 @@ de respuesta* no es un escenario: es un deseo.
 | **Estímulo** | Se decide activar o desactivar una función ya desplegada |
 | **Artefacto** | Configuración del tier de lógica |
 | **Entorno** | Producción |
-| **Respuesta** | Se cambia el *feature toggle* por variable de entorno y se reinicia el nodo de forma escalonada |
+| **Respuesta** | Se cambia el *feature toggle* (`features.new-dashboard`) por variable de entorno y se reinicia el nodo de forma escalonada |
 | **Medida** | Cambio efectivo en ≤ 1 min; **0 recompilaciones**; el artefacto binario no cambia |
+| **Verificado** | Estructural — el mecanismo es el mismo de v1.0, sin cambios |
 
 ---
 
@@ -256,9 +316,9 @@ Responde: *¿cómo está organizado el código y quién puede cambiar qué?*
 graph TD
     subgraph tier2["Tier de lógica — com.taller.auth"]
         C[controller<br/>borde HTTP]
-        S[service<br/>reglas de negocio]
-        R[repository<br/>acceso a datos]
-        M[model<br/>entidades]
+        S[service<br/>reglas de negocio + TokenService]
+        R[repository<br/>UserRepository, RefreshTokenRepository]
+        M[model<br/>User, RefreshTokenEntity]
         D[dto<br/>contratos]
         E[exception<br/>banda transversal]
         CF[config<br/>seguridad, resiliencia, salud]
@@ -279,16 +339,19 @@ Nunca al revés. El servicio no conoce HTTP; el repositorio no conoce reglas de 
 Esta es la aplicación directa de la regla estructural del Capítulo 1: *módulos con
 ocultamiento de información e interfaces separadas de las implementaciones*.
 
+El paquete `model`/`repository` se redujo respecto a v1.0: `SessionEntity`/
+`SessionRepository` (la sesión persistida completa) desaparecieron; solo queda
+`RefreshTokenEntity`/`RefreshTokenRepository`, porque el token de acceso ya no se
+persiste (ADR-08). Es una reducción real de superficie de código, no un renombrado.
+
 Las flechas punteadas hacia `exception` no son dependencias de uso normales: representan
 la **preocupación transversal**. Todo módulo lanza excepciones de esa jerarquía y un solo
 punto las traduce a respuestas.
 
 `config` y `security` **no aparecen como dependientes de nadie** a propósito: son
-infraestructura transversal que Spring *inyecta* en los demás módulos (el filtro de
-correlation id envuelve cada petición HTTP antes de que llegue al controlador; los beans
-de `config` los usa el framework, no el código de negocio). Ninguna clase de `service` o
-`controller` importa una clase de `config`/`security`, así que dibujar una flecha de
-dependencia de código ahí sería inexacto.
+infraestructura transversal que Spring *inyecta* en los demás módulos. Ninguna clase de
+`service` o `controller` importa una clase de `config`/`security`, así que dibujar una
+flecha de dependencia de código ahí sería inexacto.
 
 ### 5.2 Vista C&C — componentes y conectores en tiempo de ejecución
 
@@ -296,20 +359,33 @@ Responde: *¿qué se está ejecutando y cómo se habla entre sí?*
 
 ```mermaid
 graph LR
-    NAV[Navegador] -->|HTTP/JSON| NG[nginx<br/>balanceador]
-    NG -->|HTTP| B1[backend-1<br/>Spring Boot]
-    NG -->|HTTP| B2[backend-2<br/>Spring Boot]
-    B1 -->|JDBC/TCP| PG[(PostgreSQL)]
-    B2 -->|JDBC/TCP| PG
+    NAV[Navegador] -->|HTTP/JSON<br/>routing mesh :8080| SWARM{{Swarm ingress}}
+    SWARM --> B1[backend #1<br/>Spring Boot]
+    SWARM --> B2[backend #2<br/>Spring Boot]
+    SWARM --> B3[backend #3<br/>Spring Boot]
+    B1 -->|JDBC multi-host<br/>targetServerType=primary| PG1[(postgres-1)]
+    B2 --> PG1
+    B3 --> PG1
+    PG1 -.->|replicación<br/>streaming| PG2[(postgres-2<br/>standby)]
+    PG1 -.->|replicación<br/>streaming| PG3[(postgres-3<br/>standby)]
     B1 -.->|stdout JSON| LOG[(Logs)]
     B2 -.->|stdout JSON| LOG
+    B3 -.->|stdout JSON| LOG
 ```
 
-**Las dos fronteras remotas** (las líneas punteadas verticales del diagrama original del
-taller) son: `navegador ↔ nginx ↔ backend` (HTTP) y `backend ↔ PostgreSQL` (JDBC). Ambas
-pueden dar timeout, conexión rechazada o nodo caído; ambas necesitan tácticas. Que la
-segunda no sea HTTP no la hace menos remota — de hecho es donde vive el pool de
-conexiones, el recurso que se agota primero cuando el tier de datos se degrada.
+**Cambio central respecto a v1.0:** nginx desapareció del diagrama por completo (ADR-10);
+el *routing mesh* de Swarm es infraestructura del propio orquestador, no un componente
+desplegado que pueda quedar como SPOF. Y las flechas backend→Postgres ya **no** son
+uniformes: solo `/login` y `/refresh` las usan; `/validate` (el 95 % del tráfico) no tiene
+ninguna flecha hacia el tier de datos — se resuelve enteramente dentro del propio backend.
+Esa asimetría, invisible en el diagrama de v1.0 porque no existía, es el punto central de
+la sección 11.
+
+**Las fronteras remotas** que importan ahora: `navegador ↔ Swarm ingress ↔ backend` (HTTP,
+las 3 réplicas indistinguibles entre sí gracias al *statelessness* de la Fase 1) y
+`backend ↔ Postgres` (JDBC, y solo para el 5 % del tráfico). La replicación
+`postgres-1 ↔ postgres-2/3` es una tercera frontera remota nueva en esta versión, interna
+al tier de datos, gestionada por `repmgr` y no por el backend.
 
 ### 5.3 Vista de asignación — despliegue
 
@@ -317,43 +393,49 @@ Responde: *¿dónde vive cada cosa y qué se cae junto?*
 
 ```mermaid
 graph TB
-    subgraph host["Host Docker"]
-        subgraph net["Red bridge interna"]
-            NGC["Contenedor nginx<br/>:80"]
-            BC1["Contenedor backend-1<br/>NODE_ID=backend-1"]
-            BC2["Contenedor backend-2<br/>NODE_ID=backend-2"]
-            PGC["Contenedor postgres<br/>volumen persistente"]
+    subgraph swarm["Swarm — 1 a N nodos, mismo stack.yml"]
+        subgraph net["Red overlay auth-net"]
+            BS["Servicio backend<br/>deploy.replicas: 3<br/>routing mesh :8080"]
+            PS1["Servicio postgres-1<br/>bitnamilegacy/postgresql-repmgr"]
+            PS2["Servicio postgres-2<br/>standby"]
+            PS3["Servicio postgres-3<br/>standby"]
         end
+        SEC[("secrets:<br/>jwt_secret, postgres_password,<br/>postgres_superuser_password,<br/>repmgr_password")]
     end
-    NGC --> BC1
-    NGC --> BC2
-    BC1 --> PGC
-    BC2 --> PGC
+    BS -.->|monta| SEC
+    PS1 -.->|monta| SEC
+    PS2 -.->|monta| SEC
+    PS3 -.->|monta| SEC
 ```
 
-**Unidades de falla:** cada contenedor es una unidad de falla independiente. `backend-1` y
-`backend-2` son **redundantes**; `nginx` y `postgres` son **puntos únicos de falla**. Esta
-vista es la que hace visible ese hecho, y por eso es la que sustenta el análisis
-cuantitativo de la sección 11. En una vista de módulos ese problema sería invisible.
+**Unidades de falla:** cada tarea de Swarm es una unidad de falla independiente, y ahora
+**todas** son redundantes — las 3 réplicas de `backend` (Redundant Spare, ya lo eran en
+v1.0) y los 3 nodos de `postgres` (nuevo: Fase 4). El único SPOF de infraestructura que
+queda, y que se documenta a propósito en vez de esconderse, es el **almacenamiento local
+por nodo**: los volúmenes de Postgres son locales a la máquina Swarm donde corre cada
+tarea (sección 14, DA-7).
 
-### 5.4 Vista de comportamiento — secuencia de autenticación
+**Mismo archivo, 1 nodo o N.** `stack.yml` no cambia entre el portátil del evaluador y una
+demo de 3 máquinas: `placement.preferences: spread` reparte las réplicas entre los nodos
+que haya disponibles, y con 1 solo nodo las 6 tareas (3 backend + 3 postgres) simplemente
+caen ahí. Es la resolución concreta del conflicto que describe la sección 2.2.
+
+### 5.4 Vista de comportamiento — secuencias
 
 ```mermaid
 sequenceDiagram
     participant N as Navegador
-    participant X as nginx
-    participant B as backend
-    participant P as PostgreSQL
+    participant B as backend (cualquier réplica)
+    participant P as Postgres (primario)
 
-    N->>X: POST /api/auth/login {usuario, contraseña}
-    X->>B: reenvía (con X-Request-Id)
+    N->>B: POST /api/auth/login {usuario, contraseña}
     B->>P: SELECT usuario
     P-->>B: fila del usuario
     B->>B: ¿cuenta bloqueada? ¿BCrypt coincide?
     alt credenciales válidas
-        B->>P: INSERT sesión
-        B->>B: guarda en caché local
-        B-->>N: 200 {token, expiresAt}
+        B->>P: INSERT refresh_token
+        B->>B: firma el JWT de acceso (HMAC-SHA256, en memoria)
+        B-->>N: 200 {accessToken, refreshToken, ...}
     else credenciales inválidas
         B->>P: UPDATE intentos fallidos
         B-->>N: 401 {code: invalid_credentials, kind: EXPECTED}
@@ -362,9 +444,27 @@ sequenceDiagram
     end
 ```
 
-Las tres ramas del `alt` son exactamente las tres clases de resultado que hay que
-distinguir para medir: éxito, resultado esperado adverso y **fallo real**. Solo la tercera
-cuenta contra la disponibilidad.
+```mermaid
+sequenceDiagram
+    participant N as Navegador
+    participant B as backend (cualquier réplica)
+
+    N->>B: POST /api/auth/validate {token}
+    B->>B: verifica firma HMAC-SHA256 + expiración (en memoria)
+    alt firma y expiración válidas
+        B-->>N: 200 {username, expiresAt}
+    else firma inválida o expirado
+        B-->>N: 401 {code: invalid_session, kind: EXPECTED}
+    end
+    Note over B: CERO llamadas al tier de datos.<br/>Nunca puede responder 503 por esta causa.
+```
+
+El segundo diagrama es la diferencia estructural más importante de esta versión: en v1.0,
+`validate` tenía una rama hacia PostgreSQL (o hacia la caché local en modo degradado). En
+v2.0 esa rama **no existe**: no hay nada que degradar porque no hay nada de qué depender.
+Las tres ramas del `alt` del primer diagrama siguen siendo las tres clases de resultado que
+hay que distinguir para medir (éxito, resultado esperado adverso, fallo real) — pero ahora
+solo aplican al 5 % del tráfico.
 
 ---
 
@@ -406,27 +506,33 @@ esa reversibilidad es, en sí misma, el argumento de ocultamiento de informació
 el orquestador **reiniciara en cascada los nodos sanos** del tier de lógica, convirtiendo
 una falla parcial en una caída total. Es el error clásico y es, precisamente, un caso de
 táctica mal aplicada que empeora el atributo que pretendía mejorar.
-**Consecuencias:** un nodo puede estar "vivo pero no listo". El balanceador lo saca de
-rotación sin matarlo (*Removal from Service*), y vuelve solo cuando la dependencia sana.
+**Consecuencias:** un nodo puede estar "vivo pero no listo". El *routing mesh* de Swarm lo
+saca de rotación sin matarlo (*Removal from Service*), y vuelve solo cuando la dependencia
+sana. Sigue exactamente igual en Swarm que en la versión con nginx: el mecanismo (Docker
+`HEALTHCHECK` sobre `/actuator/health/liveness`) no cambió, solo cambió quién lo consume.
 
-### ADR-04 — Degradación con caché local de sesiones
+### ADR-04 — Degradación con caché local de sesiones *(superada por ADR-08)*
 
-**Estado:** aceptada
-**Contexto:** al caer el tier de datos, la reacción por defecto sería devolver 503 a todo.
-**Decisión:** el tier de lógica mantiene una caché en memoria de las sesiones que él mismo
-emitió. Si el tier de datos cae, `validate` responde desde la caché con `degraded: true`.
-**Justificación:** es preferible servicio parcial a caída total. Los usuarios ya
-autenticados no notan nada; se pierde solo la capacidad de **crear** sesiones nuevas.
-**Consecuencias negativas:** la caché es local a cada réplica y no es fuente de verdad; un
-`logout` durante la degradación no se propaga a la otra réplica. Es una **inconsistencia
-aceptada conscientemente**, acotada por el TTL de la sesión. Está detrás de un feature
-toggle para poder demostrar el sistema con y sin la táctica.
+**Estado:** ~~aceptada~~ **superada — ver ADR-08**
+**Contexto histórico:** al caer el tier de datos, la reacción por defecto sería devolver
+503 a todo. La v1.0 mantenía una caché en memoria de las sesiones emitidas por cada
+réplica, y `validate` respondía desde ahí con `degraded: true` mientras la BD estuviera
+abajo.
+**Por qué se abandona, no se mejora:** la caché resolvía el síntoma (validate seguía
+funcionando) pero conservaba la causa (validate seguía siendo, conceptualmente, una
+operación que depende del tier de datos, solo que con una segunda fuente de verdad
+eventualmente inconsistente entre réplicas — un `logout` durante la degradación no se
+propagaba). ADR-08 elimina la dependencia en vez de tolerarla, lo que hace innecesaria
+esta táctica por completo: no puede haber inconsistencia en una caché que no existe.
+**Se conserva este ADR** (en vez de borrarlo) porque documentar por qué una decisión
+anterior se abandonó es tan importante como documentar la decisión nueva — es la
+diferencia entre una arquitectura que aprende y una que solo acumula parches.
 
 ### ADR-05 — Reintentos solo sobre operaciones idempotentes
 
 **Estado:** aceptada
 **Decisión:** el retry se aplica a lecturas y a actualizaciones idempotentes; nunca a la
-creación de usuario o de sesión sin control.
+creación de usuario o de refresh token sin control.
 **Justificación:** reintentar un `INSERT` a ciegas ante un timeout puede duplicar el
 efecto cuando la operación **sí** se ejecutó y lo que se perdió fue la respuesta. El retry
 mal aplicado convierte una falla de disponibilidad en una falla de integridad, que es peor.
@@ -435,45 +541,164 @@ mal aplicado convierte una falla de disponibilidad en una falla de integridad, q
 
 **Estado:** aceptada
 **Decisión:** la misma imagen Docker se promueve por todos los entornos; toda diferencia
-viene de variables de entorno y perfiles.
+viene de variables de entorno, secrets y perfiles.
 **Justificación:** es la condición de *repeatability* del Cap. 5. Si se recompila por
 entorno, lo probado en staging no es lo que corre en producción y las pruebas pierden
-valor probatorio.
+valor probatorio. Ampliado en v2.0: el mismo `stack.yml` es además el artefacto de
+despliegue único entre 1 y N nodos (ADR-09), no solo entre entornos.
 
 ### ADR-07 — `noRollbackFor` en operaciones que registran su propio fallo
 
 **Estado:** aceptada (corrige un defecto real encontrado al escribir `AvailabilityIT`)
-**Contexto:** `AuthService.login()` esta anotado `@Transactional` porque, en el camino
-exitoso, toca dos tablas (`users` y `sessions`) y necesitan commitear juntas. Por defecto,
-Spring revierte la transaccion completa ante **cualquier** `RuntimeException` no marcada
-como checked — y `InvalidCredentialsException`/`AccountLockedException` lo son, porque
-extienden `AppException extends RuntimeException`.
+**Contexto:** `AuthService.login()` está anotado `@Transactional` porque, en el camino
+exitoso, toca dos tablas (`users` y, ahora, `refresh_tokens`) y necesitan comitear juntas.
+Por defecto, Spring revierte la transacción completa ante **cualquier** `RuntimeException`
+no marcada como *checked* — y `InvalidCredentialsException`/`AccountLockedException` lo
+son, porque extienden `AppException extends RuntimeException`.
 
 El efecto: cada intento fallido llamaba `lockoutPolicy.registerFailure(user, now)` y
 `userRepository.save(user)` para persistir el contador, y **acto seguido** lanzaba
-`InvalidCredentialsException`. Spring interpretaba esa excepcion como una razon para
-deshacer la transaccion completa — incluyendo el `save` que acababa de registrar el
-intento fallido. Resultado: la cuenta nunca se bloqueaba de verdad, sin importar cuantas
-veces se probara la password mala. La API respondia `401` en cada intento (correcto), pero
-el efecto secundario que debia acumularse (el contador) desaparecia con cada rollback.
+`InvalidCredentialsException`. Spring interpretaba esa excepción como una razón para
+deshacer la transacción completa — incluyendo el `save` que acababa de registrar el
+intento fallido. Resultado: la cuenta nunca se bloqueaba de verdad.
 
-**Como se detecto:** ningun test manual (Fase 4) probo un **sexto** intento tras agotar el
-umbral; `AvailabilityIT.unaCuentaBloqueadaPorFuerzaBrutaNoAfectaAOtrosUsuarios` si lo hizo,
-y fallo con `expected: 423 LOCKED but was: 200 OK`. Es la prueba mas concreta, dentro de
-este proyecto, de por que **ESC-D5 sin una medida automatizada es solo una aspiracion**.
+**Cómo se detectó:** ningún test manual probó un **sexto** intento tras agotar el umbral;
+`AvailabilityIT.unaCuentaBloqueadaPorFuerzaBrutaNoAfectaAOtrosUsuarios` sí lo hizo, y falló
+con `expected: 423 LOCKED but was: 200 OK`.
 
 **Decisión:** `@Transactional(noRollbackFor = AppException.class)` en `AuthService.login()`.
-Cuando el metodo lanza una `AppException` (un resultado `EXPECTED`), la transaccion
-**comitea** igual: el efecto secundario que la motivo (contar el intento, en este caso) es
-precisamente lo que se quiere conservar.
 **Justificación:** una `AppException` no es un error del sistema que deba deshacer trabajo;
 es información de negocio. Tratar "password incorrecta" como si fuera un fallo que invalida
 toda la transacción es exactamente el tipo de confusión entre `EXPECTED` y `FAILURE` que la
-sección 7 advierte, aplicada esta vez no a una metrica sino al propio flujo de control.
-**Consecuencias:** cualquier metodo `@Transactional` que registre estado (contadores,
-auditoria, intentos) antes de lanzar una excepcion de negocio debe revisarse con el mismo
-criterio. Estar anotado `@Transactional` no garantiza que un efecto secundario sobreviva si
-el metodo termina en excepcion — hay que decidirlo explícitamente por excepcion.
+sección 7 advierte, aplicada esta vez no a una métrica sino al propio flujo de control.
+**Consecuencias:** sigue vigente sin cambios en v2.0; `TokenService.issue()` (que
+reemplazó a `createSession()`) respeta el mismo criterio.
+
+### ADR-08 — Sesiones sin estado con JWT
+
+**Estado:** aceptada
+**Contexto:** `validate` es, por mezcla de tráfico realista, ~95 % de las peticiones al
+sistema. En v1.0, cada llamada consultaba PostgreSQL, lo que ponía al tier de datos en el
+camino crítico de casi toda petición: la disponibilidad del sistema quedaba acotada por
+la disponibilidad de la BD, sin importar cuántas réplicas tuviera el backend.
+**Decisión:** el token de acceso es un JWT firmado con HMAC-SHA256. `validate` verifica
+la firma y la expiración **enteramente en memoria** — cero llamadas al tier de datos. El
+refresh token, en cambio, es opaco, de vida larga (7 días) y sí se persiste: es la única
+pieza revocable, y solo se usa en `/login` y `/refresh` (el 5 % restante del tráfico).
+**Consecuencia aceptada (el trade-off central):** un JWT no se puede revocar antes de que
+expire sin volver a introducir estado compartido entre réplicas. Se acepta una ventana de
+revocación de hasta `JWT_TTL_SECONDS` (15 minutos por defecto) a cambio de eliminar la
+dependencia del tier de datos en el 95 % del tráfico.
+**Alternativas descartadas:**
+- *Lista de revocación en Redis* — reintroduce exactamente el mismo problema con otro
+  nombre: ahora `validate` dependería de que Redis esté arriba, y Redis sería un SPOF
+  nuevo en el camino crítico. No resuelve nada, solo cambia el nombre del componente que
+  falla.
+- *TTL más largo con revalidación periódica contra la caché de v1.0* — conserva la
+  inconsistencia entre réplicas que ADR-04 ya identificaba como problema, sin ganar nada
+  a cambio.
+- *Sesiones con Sticky Sessions (afinidad de réplica)* — resolvería la consistencia sin
+  BD, pero reintroduce un SPOF de enrutamiento (la réplica "dueña" de la sesión) y
+  rompe la ventaja de que cualquier réplica pueda atender cualquier petición.
+**Consecuencias positivas medidas:** con el tier de datos completamente caído,
+`/api/auth/validate` con un token vigente sigue respondiendo `200` (`StatelessAccessTokenIT`,
+y confirmado en vivo dos veces contra Swarm real: E4 y E8/E9). Es la evidencia más directa
+de que la decisión funciona, no solo se diseñó.
+
+### ADR-09 — Docker Swarm en vez de Kubernetes o de mantener Docker Compose
+
+**Estado:** aceptada
+**Contexto:** el enunciado exigía, en su restricción original (RE-5), un despliegue de un
+solo host sin orquestador de producción — precisamente porque el segundo atributo de
+calidad exigido, *despliegue sencillo para el evaluador*, tira en dirección contraria a
+*alta disponibilidad*: un cluster de verdad normalmente exige varios nodos, y el
+evaluador no tiene varios nodos.
+**Decisión:** Docker Swarm, con `stack.yml` como único archivo de despliegue tanto para
+el evaluador (1 nodo) como para una demo de alta disponibilidad (N nodos). Kubernetes se
+descartó explícitamente.
+**Por qué no Kubernetes:** un cluster de Kubernetes de verdad (con almacenamiento
+persistente, ingress controller, etc.) sí habría cumplido el atributo de disponibilidad,
+pero **habría roto el de despliegue sencillo** — instalar y operar `kubeadm`/`minikube`/
+`kind` es una barrera de entrada que Swarm no tiene: `docker swarm init` es un comando
+que ya viene con cualquier instalación de Docker. Kubernetes habría optimizado el atributo
+prioritario (disponibilidad, sección 3.3) a costa de romper el segundo, y con eso
+convertido en un problema para el evaluador — exactamente el tipo de decisión que el
+Cap. 6 advierte que hay que evitar: optimizar un atributo de calidad ignorando cómo se
+mueven los demás.
+**Lo que Swarm aporta nativamente** sobre la topología nginx + docker-compose de v1.0:
+*routing mesh* (ADR-10), reprogramación automática de tareas caídas (*Reconfiguration*,
+Cap. 4 — antes era "No soportada" en la sección 13, ahora es "Sí"), y *rolling update*
+declarativo con `HEALTHCHECK` y rollback automático (`update_config` en `stack.yml`).
+**Consecuencias negativas:** el modelo de "un servicio con replicas: N" no sirve para
+Postgres (componentes con estado no intercambiable); la Fase 4 tuvo que modelar cada nodo
+del cluster como un servicio propio (ver ADR-11). Los volúmenes de Swarm son locales al
+nodo — sin un StatefulSet-equivalente, es una limitación real que se documenta en la
+sección 14 en vez de disimularse.
+**Verificado:** `./scripts/deploy.sh` levantó el stack completo (3 réplicas de backend +
+3 nodos de Postgres) en un solo nodo con un comando, en las corridas de las Fases 2-4.
+
+### ADR-10 — Eliminación de nginx como balanceador de instancia única
+
+**Estado:** aceptada
+**Contexto:** en v1.0, nginx era el balanceador delante de las 2 réplicas del backend —
+y, como instancia única, era exactamente el tipo de SPOF que la sección 11 de v1.0
+señalaba como la causa principal de no alcanzar 99.99 %.
+**Decisión:** eliminar nginx del stack. El *routing mesh* de Swarm (parte del propio
+orquestador, no un contenedor desplegado) balancea nativamente entre todas las réplicas
+sanas del servicio `backend`, desde cualquier nodo del cluster.
+**Justificación:** un balanceador de instancia única no deja de ser un SPOF por estar
+"delante" de componentes redundantes — al contrario, se convierte en el eslabón más
+débil de la cadena en serie (sección 11.4 de v1.0 ya lo señalaba matemáticamente).
+Migrar a Swarm (ADR-09) resuelve este problema como efecto colateral, sin agregar una
+pieza nueva que operar.
+**Consecuencias:** ya no hay `nginx.conf` que mantener ni un `max_fails`/`fail_timeout`
+que calibrar a mano; el mecanismo equivalente (sacar una tarea no saludable de rotación)
+lo gestiona Swarm a partir del mismo `HEALTHCHECK` de Docker que ya existía.
+
+### ADR-11 — Alta disponibilidad de Postgres con repmgr (Fase 4, MVP)
+
+**Estado:** aceptada
+**Contexto:** con ADR-08 en pie, Postgres ya solo está en el camino crítico del 5 % del
+tráfico, así que el objetivo de 99.99 % se cumple **con o sin** esta decisión (sección
+11.3, escenario "sin Fase 4"). Esto es refuerzo, no requisito — se documenta como tal.
+**Decisión:** 3 nodos de Postgres (`postgres-1/2/3`, imagen
+`bitnamilegacy/postgresql-repmgr:16-debian-12` — Bitnami retiró las imágenes gratuitas de
+su namespace `bitnami/` a mediados de 2025; `bitnamilegacy` es donde quedaron las últimas
+versiones públicas sin subscripción, hallazgo hecho en vivo al intentar el primer
+despliegue) con `repmgrd` corriendo en cada uno para elección de líder y promoción
+automática de un standby. El backend usa una URL JDBC multi-host
+(`POSTGRES_HOSTS=postgres-1:5432,postgres-2:5432,postgres-3:5432`) con
+`targetServerType=primary`: el driver prueba cada host y sigue solo al que responda como
+primario, sin necesidad de reiniciar el backend tras un failover.
+**Por qué no es Kubernetes con un StatefulSet:** Swarm no tiene el equivalente. Cada nodo
+del cluster repmgr es un **servicio propio** (no `replicas: 3` de un solo servicio), cada
+uno con su propio volumen local — la única forma de darle a cada nodo una identidad de
+red y un disco estables en Swarm.
+**Hallazgos reales durante la construcción (no hipotéticos):**
+1. `docker kill` sobre el primario **no** sirve para probar el failover: con
+   `restart_policy: condition: any`, Swarm revive el *mismo* contenedor (mismo volumen,
+   todavía marcado como primario en su WAL) en ~8 s — más rápido que la ventana de
+   reconexión de `repmgrd` (`reconnect_attempts=3` × `reconnect_interval=5s` ≈ 15 s), así
+   que nunca se llega a promover a nadie. Hubo que apagar el primario con
+   `docker service scale =0` para sostener la caída el tiempo suficiente.
+2. **Split-brain confirmado en vivo.** Revivir al viejo primario con su volumen intacto
+   no lo hace reincorporarse como standby: Bitnami reutiliza el `PGDATA` existente tal
+   cual, con su rol de primario todavía marcado, sin comprobar si alguien más fue
+   promovido mientras estuvo caído. Resultado, verificado con `psql` directo contra cada
+   nodo: **dos nodos aceptando escrituras a la vez**, mientras el backend seguía
+   enrutando tráfico según el orden de la lista `POSTGRES_HOSTS`. Se corrigió apagando al
+   nodo divergente y borrando su volumen antes de reincorporarlo, forzando un re-clonado
+   limpio (`pg_basebackup`) desde el primario real — automatizado en
+   `scripts/chaos-db-failover.sh`.
+**Limitación conocida y no resuelta a propósito (RE-6):** los volúmenes son locales al
+nodo Swarm. Si el nodo que corría al primario **muere de verdad** (no solo el
+contenedor) y no es el manager, ese slot pierde su disco y necesita re-aprovisionarse a
+mano — ese caso sigue pareciéndose al escenario original de ~1 h de intervención manual,
+no a los ~29 s medidos aquí. Resolverlo de verdad exige almacenamiento distribuido
+(NFS/EBS/CSI), fuera del alcance de un MVP de taller (sección 14, DA-7).
+**Verificado:** MTTR de failover de **29 s**, medido en dos corridas independientes,
+reproducible, con el backend sirviendo `/login` correctamente contra el nuevo primario
+sin reiniciarse (E9, sección 12).
 
 ---
 
@@ -496,12 +721,10 @@ graph LR
 
 Toda táctica del Capítulo 4 corta esta cadena en algún punto. Prevenir actúa antes de que
 la falta exista o se active; detectar descubre el error antes de que se vuelva fallo;
-recuperar contiene el error para que no llegue al usuario.
+recuperar contiene el error para que no llegue al usuario. Esta sección no cambió respecto
+a v1.0 — la taxonomía es del código (`FaultKind`), no de la topología de despliegue.
 
 ### 7.1 Clasificación en el código
-
-Se implementa el enum `FaultKind`, y cada excepción de la jerarquía `AppException` declara
-la suya:
 
 | `FaultKind` | Significado | ¿Cuenta contra la disponibilidad? |
 |---|---|---|
@@ -519,20 +742,26 @@ la suya:
 | `user_already_exists` | 409 | EXPECTED | no | El usuario ya está registrado |
 | `validation_error` | 400 | EXPECTED | no | Datos de entrada inválidos (Bean Validation) |
 | `malformed_request` | 400 | EXPECTED | no | Cuerpo de la petición no es JSON válido |
-| `invalid_session` | 401 | EXPECTED | no | Token inexistente o expirado |
-| `data_unavailable` | 503 | FAILURE | sí | El tier de datos no responde (timeout, retry agotado o circuito abierto) |
+| `invalid_session` | 401 | EXPECTED | no | Token de acceso inválido/expirado, o refresh token inexistente/expirado |
+| `data_unavailable` | 503 | FAILURE | sí | El tier de datos no responde (timeout, retry agotado o circuito abierto) — solo puede ocurrir en `/login` o `/refresh` |
 | `internal_error` | 500 | FAULT | no | Excepción no prevista (falta latente activada) |
 
-No existe un código `circuit_open` ni `downstream_timeout` separados: cuando el circuito
-está abierto o una consulta excede el timeout, el `fallbackMethod` de Resilience4j
-intercepta la excepción y la reduce siempre a `data_unavailable`/503. Es intencional —
-al cliente le basta con saber "el tier de datos no responde, reintenta luego"; distinguir
-la causa exacta solo importa para el operador, y esa causa sí queda diferenciada en el
-log (`event=circuit_breaker_state_change` en `ResilienceConfig`) y en `/api/diagnostics`.
+**Cambio respecto a v1.0:** `invalid_session` ya no representa una fila de sesión ausente
+en Postgres — representa una firma JWT inválida o expirada, verificada en memoria. El
+código y el `kind` no cambiaron; lo que cambió por completo es **cómo** se llega a ese
+resultado, y el hecho de que ya no puede ser causado por una caída del tier de datos (antes
+sí: si la BD estaba caída y la caché local tampoco tenía el token, `validate` también podía
+terminar en `data_unavailable`; ahora esa ruta no existe).
 
-**Punto crítico para la medición:** una contraseña equivocada es `EXPECTED`. Si se contara
-como fallo, un usuario torpe bajaría la disponibilidad reportada y la métrica del 99.99 %
-no significaría nada. Este es el error más común en la instrumentación de estos sistemas.
+`/api/auth/logout` tiene un comportamiento propio no capturado en esta tabla de errores
+porque no es un error: si el tier de datos no responde, `logout` devuelve `202 Accepted`
+con `{"revoked": false, "note": "..."}` en vez de fallar — es *best-effort* documentado en
+ADR-08 (el token de acceso expira solo, aunque no se pueda revocar el refresh token en ese
+momento).
+
+**Punto crítico para la medición, sin cambios:** una contraseña equivocada es `EXPECTED`.
+Si se contara como fallo, un usuario torpe bajaría la disponibilidad reportada y la
+métrica del 99.99 % no significaría nada.
 
 ---
 
@@ -542,13 +771,13 @@ no significaría nada. Este es el error más común en la instrumentación de es
 
 | Táctica | Implementación | Escenario que atiende |
 |---|---|---|
-| **Ping/Echo** | `GET /actuator/health/liveness`, consultado por el `HEALTHCHECK` de Docker y por nginx | ESC-D1, ESC-D6 |
-| **Sanity Checking / Self-Test** | `DataTierHealthIndicator`: `SELECT 1` con timeout corto | ESC-D2 |
-| **Condition Monitoring** | `readiness` evalúa el estado de las dependencias antes de aceptar tráfico | ESC-D6 |
-| **Monitor** | Actuator + Micrometer: contador `errors.<kind>` (`errors.expected`, `errors.fault`, `errors.error`, `errors.failure`, etiquetado por `code`) incrementado en `GlobalExceptionHandler`; estado del circuito expuesto en `/api/diagnostics` | Todos |
-| **Heartbeat** | Tarea `@Scheduled` que emite un latido con el `NODE_ID` | ESC-D1 |
+| **Ping/Echo** | `GET /actuator/health/liveness`, consultado por el `HEALTHCHECK` de Docker en cada tarea de Swarm | ESC-D1, ESC-D6 |
+| **Sanity Checking / Self-Test** | `DataTierHealthIndicator`: `SELECT 1` con timeout corto | ESC-D2, ESC-D7 |
+| **Condition Monitoring** | `readiness` evalúa el estado de las dependencias antes de aceptar tráfico; `repmgrd` monitorea la salud del primario en cada standby | ESC-D6, ESC-D7 |
+| **Monitor** | Actuator + Micrometer: contador `errors.<kind>`, etiquetado por `code`; estado del circuito expuesto en `/api/diagnostics` | Todos |
+| **Heartbeat** | Tarea `@Scheduled` que emite un latido con el `NODE_ID` (ahora derivado del hostname templado por Swarm, no fijado a mano) | ESC-D1 |
 | **Exception Detection** | `GlobalExceptionHandler` con handler de `Exception.class` | ESC-D4 |
-| **Timestamp** | `createdAt` / `expiresAt` en las sesiones, para detectar estado obsoleto | ESC-D2 |
+| **Timestamp** | `createdAt` / `expiresAt` en el refresh token y en el JWT (claim `exp`), para detectar estado obsoleto | ESC-D2 |
 
 **Diferencia que conviene tener clara en la sustentación:** *Ping/Echo* lo inicia el
 monitor (pregunta y espera respuesta); *Heartbeat* lo inicia el componente monitoreado
@@ -559,31 +788,44 @@ segundo no requiere que el monitor conozca a todos los nodos.
 
 | Táctica | Implementación | Escenario |
 |---|---|---|
-| **Redundant Spare (active / hot spare)** | 2 réplicas activas del backend tras nginx, ambas atendiendo tráfico | ESC-D1 |
-| **Retry** | Resilience4j con backoff exponencial y *jitter*, solo sobre operaciones idempotentes (ADR-05) | ESC-D3 |
+| **Redundant Spare (active / hot spare)** | 3 réplicas activas del backend tras el *routing mesh* de Swarm (antes 2, tras nginx); 3 nodos de Postgres con `repmgr` (nuevo, Fase 4) | ESC-D1, ESC-D7 |
+| **Retry** | Resilience4j con backoff exponencial y *jitter*, solo sobre operaciones idempotentes (ADR-05) — ahora solo relevante para el 5 % del tráfico | ESC-D3 |
 | **Exception Handling** | La banda transversal: ninguna excepción termina el proceso | ESC-D4 |
-| **Graceful Degradation** | Caché local de sesiones: `validate` sigue funcionando con el tier de datos caído (ADR-04) | ESC-D2 |
-| **Rollback** | `scripts/rollback.sh`, vuelta a la imagen etiquetada anterior | ESC-P2 |
+| **Rollback** | `scripts/rollback.sh` → `docker service rollback`, declarativo (ver ESC-P2) | ESC-P2 |
+
+**Lo que ya no aparece aquí, y por qué es la noticia principal de esta sección:**
+*Graceful Degradation* (la caché local de v1.0, ADR-04) no está en esta tabla porque ya
+no hace falta degradar nada — `validate` no tiene una dependencia de la que degradarse
+(ADR-08). Esto no es una táctica más fuerte reemplazando a una más débil: es la
+eliminación completa de un modo de falla, algo que ninguna táctica del catálogo del Cap. 4
+por sí sola logra — las tácticas de recuperación **contienen** el daño de una falla; esta
+decisión evita que la falla exista para esa operación.
 
 El *jitter* en el backoff no es un detalle: sin él, todos los clientes reintentan en el
 mismo instante y producen una tormenta de reintentos que impide que el servicio caído se
-levante. Es un caso de táctica que, mal implementada, prolonga el MTTR.
+levante.
 
 ### 8.3 Recuperar de fallas — reintroducción
 
 | Táctica | Implementación | Escenario |
 |---|---|---|
-| **State Resync** | Al recuperarse el tier de datos, la caché local deja de usarse y la fuente de verdad vuelve a ser la BD | ESC-D2 |
-| **Escalating Restart** | Escalado manual documentado: reiniciar el contenedor → reiniciar el stack → restaurar volumen | ESC-D6 |
+| **Reconfiguration** | Swarm reprograma automáticamente una tarea de `backend` caída (ESC-D1) y `repmgrd` promueve un standby de Postgres (ESC-D7); ninguno de los dos era automático en v1.0 | ESC-D1, ESC-D7 |
+| **State Resync** | El nodo de Postgres reincorporado se re-clona (`pg_basebackup`) desde el primario vigente tras vaciar su volumen — la forma en que Postgres/repmgr resuelve la reintroducción sin arriesgar split-brain (ADR-11) | ESC-D7 |
+| **Escalating Restart** | Reducido a la sola falla que Swarm/repmgr no cubren: la muerte real del disco de un nodo no-manager, documentada como deuda (DA-7), no automatizada | — |
+
+**Cambio de calificación respecto a v1.0:** *Reconfiguration* estaba marcada como "No
+soportada" en la sección 13 de v1.0 ("Sin orquestador; la reconfiguración es manual").
+Con Swarm, pasa a "Sí" — es, junto con la eliminación de la caché de sesiones, el cambio
+de calificación más importante de esta tabla.
 
 ### 8.4 Prevenir fallas
 
 | Táctica | Implementación | Escenario |
 |---|---|---|
-| **Removal from Service** | `readiness` en rojo saca el nodo de rotación en nginx sin matarlo (ADR-03) | ESC-D6 |
-| **Transactions** | `@Transactional` en `AuthService.login()`, que toca `users` y `sessions` juntas; con `noRollbackFor` explícito para que un resultado `EXPECTED` no deshaga el registro del intento (ADR-07) | ESC-D5 |
-| **Increase Competence Set** | Bloqueo por intentos fallidos y validación de entrada: el sistema trata estados adversos como previstos, no como excepciones. Su persistencia real depende de ADR-07 — sin `noRollbackFor`, el contador se revertía en cada intento y la cuenta nunca llegaba a bloquearse | ESC-D5 |
-| **Exception Prevention** | Validación con Bean Validation en el borde; tipos fuertes; `Optional` en lugar de nulos | ESC-D4 |
+| **Removal from Service** | `readiness` en rojo saca la tarea de rotación del *routing mesh* sin matarla (ADR-03) | ESC-D6 |
+| **Transactions** | `@Transactional(noRollbackFor = AppException.class)` en `AuthService.login()` (ADR-07) | ESC-D5 |
+| **Increase Competence Set** | Bloqueo por intentos fallidos y validación de entrada | ESC-D5 |
+| **Exception Prevention** | Validación con Bean Validation en el borde; tipos fuertes; `Optional` en lugar de nulos; **negarse a arrancar sin `JWT_SECRET` en el perfil `docker`** (nuevo en Fase 1: una clave por defecto en un despliegue real es una falta latente crítica) | ESC-D4, ADR-08 |
 
 ---
 
@@ -595,18 +837,18 @@ El Capítulo 5 dice que un despliegue debe ser **granular, controlable y eficien
 
 | Cualidad | Cómo se logra aquí |
 |---|---|
-| **Granular** | Cada tier es una unidad desplegable independiente; se puede actualizar la lógica sin tocar los datos |
-| **Controlable** | El rolling upgrade avanza réplica por réplica, condicionado a `readiness`; el rollback es un comando |
-| **Eficiente** | Todo el despliegue es un script; el cycle time se mide, no se estima |
+| **Granular** | Cada tier es una unidad desplegable independiente; en Postgres, cada nodo del cluster es además una unidad independiente (Fase 4) |
+| **Controlable** | El `update_config` de Swarm avanza tarea por tarea, condicionado al `HEALTHCHECK`, con rollback automático declarativo — ya no orquestado a mano por un script |
+| **Eficiente** | Todo el despliegue es un comando (`deploy.sh`); el *cycle time* se mide (115 s), no se estima |
 
 ### 9.2 Tácticas
 
 | Categoría | Táctica | Implementación |
 |---|---|---|
-| Gestionar el pipeline | **Script Deployment Commands** | `rolling-upgrade.sh`, `rollback.sh`: cero pasos manuales |
-| Gestionar el pipeline | **Scale Rollouts** | El upgrade avanza de a una réplica, verificando salud entre pasos |
-| Gestionar el pipeline | **Rollback** | Reversión por etiqueta de imagen |
-| Gestionar el sistema desplegado | **Feature Toggle** | `features.session-cache`, `features.new-dashboard` por variable de entorno |
+| Gestionar el pipeline | **Script Deployment Commands** | `deploy.sh`, `rolling-upgrade.sh`, `rollback.sh`: cero pasos manuales |
+| Gestionar el pipeline | **Scale Rollouts** | `update_config` de Swarm: una réplica a la vez, `start-first`, verificando `HEALTHCHECK` entre pasos |
+| Gestionar el pipeline | **Rollback** | `docker service rollback`, declarativo (antes: reetiquetar una imagen a mano) |
+| Gestionar el sistema desplegado | **Feature Toggle** | `features.new-dashboard` por variable de entorno (`features.session-cache` se eliminó junto con ADR-04: ya no hay nada que activar/desactivar) |
 | Gestionar el sistema desplegado | **Package Dependencies** | Imagen Docker multietapa: dependencias congeladas en el artefacto |
 | Gestionar el sistema desplegado | **Manage Service Interactions** | Apagado ordenado (`graceful shutdown`) para no cortar peticiones en vuelo |
 
@@ -615,16 +857,14 @@ El Capítulo 5 dice que un despliegue debe ser **granular, controlable y eficien
 ```mermaid
 graph LR
     DEV[Desarrollo<br/>mvnw test] --> INT[Integración<br/>build imagen]
-    INT --> STG[Staging<br/>compose + pruebas]
-    STG --> PRD[Producción<br/>rolling upgrade]
-    PRD -.->|si falla| RB[Rollback]
+    INT --> STG[Staging<br/>deploy.sh en 1 nodo]
+    STG --> PRD[Producción<br/>rolling-upgrade.sh]
+    PRD -.->|si falla| RB[docker service rollback]
 ```
 
 **Cycle time** = tiempo desde el *commit* hasta que el cambio está sirviendo tráfico en
-producción. Es la medida central del Capítulo 5 y se registra en `rolling-upgrade.sh`.
-
-**Trazabilidad:** cada imagen se etiqueta con el hash del commit, de modo que para
-cualquier contenedor en ejecución se puede decir exactamente qué código contiene.
+producción. Medido en **115 s** (`rolling-upgrade.sh`, E5), con **0 peticiones fallidas**
+en una sonda concurrente de 133 muestras.
 
 ---
 
@@ -635,15 +875,17 @@ cualquier contenedor en ejecución se puede decir exactamente qué código conti
 | **Three-tier / N-tier** | Estructura global | Separación de responsabilidades con fronteras de despliegue |
 | **Layers** | Interior del tier de lógica | Dependencias en un solo sentido: controller → service → repository |
 | **Repository** | `repository/` | Oculta la decisión de motor de persistencia (habilita ADR-02) |
-| **Load-Balanced Cluster** | nginx + 2 réplicas | Redundancia activa, base de ESC-D1 |
-| **Circuit Breaker** | Acceso al tier de datos | Evita el fallo en cascada y el agotamiento del pool |
-| **Blue-Green / Rolling Upgrade** | `rolling-upgrade.sh` | Despliegue sin interrupción (ESC-P1) |
+| **Service Mesh liviano (routing mesh de Swarm)** | Infraestructura de Swarm | Reemplaza a Load-Balanced Cluster + nginx: redundancia activa sin un balanceador desplegado como componente propio (ADR-10) |
+| **Circuit Breaker** | Acceso al tier de datos (`/login`, `/refresh`) | Evita el fallo en cascada y el agotamiento del pool, ahora acotado al 5 % del tráfico |
+| **Leader Election** | Cluster de Postgres con `repmgr` | Base de ESC-D7: exactamente un primario en todo momento, con promoción automática (Fase 4) |
+| **Rolling Upgrade declarativo** | `stack.yml` → `update_config` | Despliegue sin interrupción (ESC-P1), gestionado por el orquestador en vez de por un script imperativo |
 | **Health Endpoint Monitoring** | Actuator | Base de detección y de *Removal from Service* |
+| **Stateless Session Token (JWT)** | `TokenService` | Elimina la afinidad de réplica y la dependencia del tier de datos en el 95 % del tráfico (ADR-08) |
 
 La relación entre patrones y tácticas es la del Capítulo 3: **un patrón agrupa varias
-tácticas**. Por ejemplo, el patrón Load-Balanced Cluster combina Redundant Spare,
-Ping/Echo y Removal from Service. Las tácticas son decisiones puntuales; los patrones son
-paquetes probados de decisiones que se refuerzan entre sí.
+tácticas**. El *routing mesh* de Swarm, por ejemplo, combina Redundant Spare, Ping/Echo
+(vía `HEALTHCHECK`) y Removal from Service — el mismo paquete que antes ofrecía
+Load-Balanced Cluster con nginx, pero sin el componente que era, él mismo, un SPOF.
 
 ---
 
@@ -658,141 +900,188 @@ $$A = \frac{MTBF}{MTBF + MTTR}$$
 - Componentes **en serie** (todos necesarios): $A_{total} = \prod A_i$
 - Componentes **en paralelo** (redundantes, basta uno): $A_{total} = 1 - \prod (1 - A_i)$
 
-### 11.2 Estimación por componente
+### 11.2 Por qué el modelo de v1.0 ya no aplica
 
-Valores estimados para el entorno del taller (un solo host Docker):
+El modelo de v1.0 trataba el sistema como **una sola cadena en serie**:
+$A_{sistema} = A_{nginx} \times A_{backend\ pool} \times A_{postgres}$, porque **toda**
+petición pasaba por los tres componentes. Esa es la razón matemática de que el resultado
+fuera 99.85 %: en una cadena en serie, la disponibilidad nunca supera al eslabón más
+débil, y con dos SPOF (nginx, Postgres) en la cadena, no había forma de superar el 99.9 %
+sin eliminarlos.
 
-| Componente | MTBF | MTTR | Disponibilidad | Configuración |
-|---|---|---|---|---|
-| nginx | 2000 h | 1 h | 0.99950 | **Único (SPOF)** |
-| backend (una réplica) | 200 h | 1 h | 0.99502 | — |
-| backend (2 réplicas) | — | — | **0.99998** | Paralelo |
-| PostgreSQL | 1000 h | 1 h | 0.99900 | **Único (SPOF)** |
+La Fase 1 (ADR-08) rompe esa premisa: **ya no toda petición pasa por el tier de datos**.
+El modelo correcto no es una cadena única, es una **mezcla ponderada de dos caminos**:
 
-Redundancia del backend:
+$$A_{sistema} = (1 - r) \times A_{validate} + r \times A_{login}$$
 
-$$A_{backend} = 1 - (1 - 0.99502)^2 = 1 - (0.00498)^2 = 0.9999752$$
+donde $r$ es la fracción de tráfico que es `/login` o `/refresh` (5 % por defecto,
+medido/configurable en `scripts/probe.sh` vía `LOGIN_RATIO`), y:
 
-Cadena en serie:
+$$A_{validate} = A_{backend\ pool} \qquad A_{login} = A_{backend\ pool} \times A_{bd}$$
 
-$$A_{sistema} = 0.99950 \times 0.9999752 \times 0.99900 = 0.99848$$
+`validate` (95 % del tráfico) depende solo del tier de lógica. `login`/`refresh` (5 %)
+siguen siendo una cadena en serie clásica, backend × BD — ahí es donde sí aplica el
+modelo de v1.0, pero acotado a una fracción pequeña del tráfico total.
 
-### 11.3 Resultado y brecha
+### 11.3 Topología y parámetros medidos
 
-| Métrica | Valor |
-|---|---|
-| Disponibilidad estimada | **99.85 %** |
-| Tiempo de inactividad anual estimado | **≈ 13.3 horas** |
-| Objetivo (RE-3) | 99.99 % |
-| Presupuesto de caída del objetivo | 52.6 min/año — 4.32 min/mes |
-| **Brecha** | El sistema está **un orden de magnitud por encima** del presupuesto permitido |
+**Tier de lógica** — 3 réplicas en redundancia activa tras el *routing mesh* de Swarm:
 
-### 11.4 Interpretación — el hallazgo central del trabajo
+$$A_{backend\ pool} = 1 - (1 - A_{replica})^3$$
 
-**La redundancia del backend no es el cuello de botella.** Duplicar réplicas lleva ese
-componente a 99.998 %, muy por encima del objetivo. El límite lo imponen los **dos puntos
-únicos de falla**: nginx y PostgreSQL. En una cadena en serie, la disponibilidad total
-nunca supera a la del eslabón más débil, así que agregar una tercera réplica del backend
-**no mejoraría la cifra en absoluto**.
+**Tier de datos** — modelado como un componente lógico único, cuyo MTTR cambia según la
+fase implementada (con o sin Fase 4); no hace falta modelar cuántos nodos hay detrás,
+basta con la disponibilidad efectiva resultante para el backend.
 
-Este es el resultado más valioso del análisis: muestra que optimizar donde es fácil —
-agregar réplicas de la aplicación — no mueve la aguja cuando el problema está en otra
-parte. Sin el cálculo, la intuición habría llevado exactamente a esa optimización inútil.
+Parámetros de entrada, cada uno con su fuente (ninguno es un número puesto a ojo — el
+detalle completo está en `scripts/availability-model.py`, `DEFAULTS_DOC`):
 
-Escenario con los SPOF eliminados (nginx redundante con IP virtual, PostgreSQL con réplica
-en espera y failover automático, ambos a 99.99 %):
+| Parámetro | Valor | Fuente |
+|---|---|---|
+| MTBF de una réplica de backend | 720 h (30 días) | **Asunción documentada**: no se puede medir en una demo corta; consistente con tasas de falla típicas de instancias/contenedores en la nube pública |
+| MTTR de una réplica de backend | **28 s** | **Medido** — E2, dos corridas independientes contra el stack real, mismo resultado ambas veces |
+| MTBF del tier de datos | 2000 h | **Asunción documentada**: es el componente menos disponible del sistema con o sin Fase 4, pero queda fuera del camino crítico del 95 % del tráfico |
+| MTTR del tier de datos, **sin** Fase 4 | 3600 s (~1 h) | **Asunción documentada**, el escenario original del enunciado: recuperación manual de una instancia única |
+| MTTR del tier de datos, **con** Fase 4 | **29 s** | **Medido** — E9, dos corridas independientes, mismo resultado ambas veces (failover automático de `repmgr`) |
+| Mezcla de tráfico | 5 % login / 95 % validate | Configuración de `probe.sh`, consistente con un patrón de uso realista |
 
-$$A = 0.9999 \times 0.9999752 \times 0.9999 = 0.99978 \Rightarrow \approx 1.9 \text{ h/año}$$
+### 11.4 Resultado
 
-Aun así queda por debajo de 99.99 %. Alcanzar cuatro nueves reales exigiría además reducir
-el MTTR de una hora a **minutos**, lo que requiere detección y conmutación automáticas en
-todos los niveles, no solo redundancia. La conclusión honesta es que **99.99 % no es
-alcanzable con la infraestructura permitida por RE-5**, y eso debe reportarse como
-limitación conocida, no disimularse.
+**Escenario 1 — arquitectura original (sin Fase 1 ni Fase 4)**, para contraste directo con
+v1.0: BD en el 100 % del camino crítico, MTTR manual de 1 h.
+
+$$A_{sistema} = 1.00 \times (A_{backend\ pool} \times A_{bd}) = 99.8613\%$$
+
+**≈ 729.5 min/año de caída — NO cumple** el objetivo de 99.99 %. Es, dentro del margen de
+las asunciones, el mismo resultado que v1.0 (99.85 %): confirma que el modelo nuevo no
+está "arreglado a la fuerza" para dar el resultado que se quiere, reproduce la conclusión
+de la versión anterior cuando se le da la misma topología.
+
+**Escenario 2 — con Fase 1 (JWT), sin Fase 4** (Postgres de instancia única, MTTR manual
+de 1 h):
+
+$$A_{sistema} = 0.95 \times 100.0000\% + 0.05 \times 99.8613\% = 99.9931\%$$
+
+**≈ 36.5 min/año de caída — CUMPLE** el objetivo, con margen. Este es el resultado central
+del trabajo: **la Fase 1 por sí sola ya cierra la brecha**, sin necesidad de redundancia en
+el tier de datos. Es la razón por la que la Fase 4 se documenta como refuerzo, no como
+requisito (ADR-11).
+
+**Escenario 3 — con Fase 1 y Fase 4** (MTTR de Postgres medido en 29 s vía `repmgr`):
+
+$$A_{sistema} = 0.95 \times 100.0000\% + 0.05 \times 99.9996\% = 99.999980\%$$
+
+**≈ 6.4 s/año de caída proyectada — CUMPLE** con un margen de más de tres órdenes de
+magnitud sobre el presupuesto de 52.6 min/año. Comando exacto para reproducir:
+
+```bash
+python3 scripts/availability-model.py --replica-mttr-seconds 28 --db-mttr-seconds 29
+```
+
+| Escenario | Disponibilidad | Downtime/año proyectado | ¿Cumple 99.99 %? |
+|---|---|---|---|
+| Original (sin Fase 1 ni 4) | 99.8613 % | 729.5 min | **No** |
+| Con Fase 1, sin Fase 4 | 99.9931 % | 36.5 min | **Sí** |
+| Con Fase 1 y Fase 4 | 99.999980 % | 6.4 s | **Sí**, con amplio margen |
+
+### 11.5 Interpretación — el hallazgo central del trabajo
+
+**Sacar al tier de datos del camino crítico vale más que hacerlo redundante.** En v1.0, la
+conclusión era que duplicar réplicas del backend no movía la aguja porque el cuello de
+botella estaba en los SPOF de la cadena en serie. La conclusión de v2.0 es más específica
+todavía: **ni siquiera hace falta eliminar el SPOF del tier de datos** para alcanzar el
+objetivo — basta con sacarlo del camino crítico del tráfico dominante. La Fase 4
+(eliminar el SPOF de verdad, con `repmgr`) sigue siendo valiosa — lleva el sistema de
+36.5 min/año a 6.4 s/año, casi tres órdenes de magnitud — pero es una optimización sobre
+una base que **ya cumplía**, no una condición para cumplir.
+
+Esto invierte la lección de v1.0 sin contradecirla: ambas versiones coinciden en que
+"agregar réplicas donde ya sobra redundancia no mueve la aguja" (el pool de backend estaba
+en 99.998 % desde v1.0 y sigue prácticamente en 100 % ahora). Donde difieren es en **dónde**
+está la palanca de mayor impacto: v1.0 concluía que había que eliminar los SPOF; v2.0
+muestra que, primero, hay una palanca más barata y más grande — cambiar **qué** depende de
+qué.
 
 ---
 
 ## 12. Plan de medición y experimentos
 
 Hay dos niveles de verificación, y ninguno sustituye al otro. Los tests automatizados
-(`./mvnw test`, 35 casos, corren en segundos sin Docker sobre H2) prueban que la **lógica**
+(`./mvnw test`, 45 casos, corren en segundos sin Docker sobre H2) prueban que la **lógica**
 hace lo que dice que hace. Los experimentos de caos de esta sección prueban que el
-**sistema desplegado** (réplicas, balanceador, red) se comporta igual bajo condiciones
-reales. Un login que pasa todos los tests unitarios puede seguir fallando en producción si
-nginx no hace failover correctamente; un sistema que sobrevive al chaos-kill puede tener,
-debajo, una regla de negocio rota que ningún experimento manual ejercita. Ambos hicieron
-falta en este proyecto: la sección 13.1 documenta un defecto (ADR-07, contador de
-bloqueo revertido por Spring) que **ningún experimento manual de la Fase 4 detectó** y que
-sí detectó `AvailabilityIT` al probar explícitamente un sexto intento de login.
+**sistema desplegado** (réplicas, cluster de Postgres, red overlay) se comporta igual bajo
+condiciones reales. A diferencia de v1.0, esta sección **ya no es una plantilla vacía**:
+todos los experimentos listados abajo se ejecutaron contra el stack de Swarm real el
+12 de agosto de 2026, y los resultados son los que se obtuvieron, no una expectativa.
 
 ### 12.0 Suite de tests automatizados
 
 | Clase | Tipo | Qué prueba |
 |---|---|---|
 | `LockoutPolicyTest` | Unitario | Lógica de bloqueo en aislamiento (sin Spring) |
-| `TokenServiceTest` | Unitario | Emisión/validación/expiración de sesiones, con `SessionRepository` simulado |
-| `AuthServiceTest` | Unitario | Reglas de registro/login, con `UserRepository`/`TokenService` simulados y BCrypt real |
-| `AuthControllerIT` | Integración (Spring real + H2) | Contrato HTTP completo de `/api/auth` y `/api/diagnostics` |
+| `TokenServiceTest` | Unitario | Emisión/validación/expiración del JWT, rotación y revocación del refresh token, con `RefreshTokenRepository` simulado — incluye el caso de arranque sin `JWT_SECRET` (docker vs. no-docker) |
+| `AuthServiceTest` | Unitario | Reglas de registro/login/refresh/logout, con `UserRepository`/`TokenService` simulados y BCrypt real |
+| `AuthControllerIT` | Integración (Spring real + H2) | Contrato HTTP completo de `/api/auth` y `/api/diagnostics`, incluida la rotación de refresh token y el rechazo de un token ya usado |
 | `AvailabilityIT` | Integración (Spring real + H2) | Taxonomía `FaultKind` end-to-end, correlation id, salud, y el escenario de fuerza bruta (ESC-D5) |
+| `StatelessAccessTokenIT` | Integración (Spring real + H2) | **Criterio de terminado de la Fase 1**: cierra el `DataSource` a mitad del test y confirma que `/api/auth/validate` sigue respondiendo `200` |
 
-`AvailabilityIT` merece mención aparte porque es, en este proyecto, la regresión
-automatizada de **dos** defectos reales que ya no pueden volver sin que la suite se ponga
-roja:
+`AvailabilityIT` y `StatelessAccessTokenIT` merecen mención aparte porque son la
+regresión automatizada de defectos y decisiones que, sin ellas, dependerían de que alguien
+se acuerde de probarlos a mano:
 
-1. **Resilience4j enrutaba cualquier excepción al `fallbackMethod`** (Fase 4): una password
-   incorrecta llegaba a responder `503 data_unavailable` en vez de `401 invalid_credentials`.
-   Los tests `unaPasswordIncorrectaEsExpected...`, `unTokenInexistenteEsExpected...` y
-   `unRegistroDuplicadoEsExpected...` verifican el `kind` exacto del cuerpo de error, no solo
-   el código HTTP — así una regresión futura no puede colarse devolviendo el status correcto
-   por casualidad con el `kind` equivocado.
+1. **Resilience4j enrutaba cualquier excepción al `fallbackMethod`** (defecto histórico):
+   una password incorrecta llegaba a responder `503 data_unavailable` en vez de
+   `401 invalid_credentials`. `AvailabilityIT` verifica el `kind` exacto del cuerpo de
+   error, no solo el código HTTP.
 2. **El contador de intentos fallidos se revertía por el rollback transaccional por
-   defecto de Spring** (ADR-07, encontrado en esta misma fase): el test
-   `unaCuentaBloqueadaPorFuerzaBrutaNoAfectaAOtrosUsuarios` agota los 5 intentos y verifica
-   que el sexto — con la password correcta — siga bloqueado. Sin `noRollbackFor`, este test
-   falla con `expected: 423 LOCKED but was: 200 OK`.
+   defecto de Spring** (ADR-07): `unaCuentaBloqueadaPorFuerzaBrutaNoAfectaAOtrosUsuarios`
+   agota los 5 intentos y verifica que el sexto siga bloqueado.
+3. **`validate` sigue en pie con la BD abajo** (ADR-08, el criterio de terminado de la
+   Fase 1): sin `StatelessAccessTokenIT`, esta garantía dependería de que nadie rompa por
+   accidente la ausencia de dependencia del tier de datos en una refactorización futura.
 
-Nota de infraestructura de pruebas: Surefire por defecto solo reconoce `*Test.java`, no
-`*IT.java` (esa es la convención del plugin Failsafe, que corre en la fase `verify`). Para
-que un solo `./mvnw test` cubra ambos niveles sin pasos adicionales, `pom.xml` extiende los
-`includes` de Surefire con `**/*IT.java`.
+### 12.1 Instrumentos
 
-### 12.1 Instrumento
+- `scripts/probe.sh` — sonda de disponibilidad contra el *routing mesh* de Swarm. Mezcla
+  configurable de `/login` (5 % por defecto) y `/validate` (95 %); clasifica cada muestra
+  con la taxonomía de la sección 7 (los `EXPECTED` **no** cuentan como fallo); calcula
+  disponibilidad global y por operación, ventanas de caída con su duración, MTBF/MTTR
+  observados y percentiles de latencia; deja un CSV crudo en `results/`.
+- `scripts/chaos.sh` — mata una tarea de `backend` y, por separado, apaga/revive el tier
+  de datos completo (los 3 nodos a la vez).
+- `scripts/chaos-db-failover.sh` (Fase 4) — identifica el primario real del cluster
+  `repmgr`, lo apaga de forma sostenida, cronometra la promoción, y reincorpora al viejo
+  primario de forma segura (vaciando su volumen para evitar split-brain, ver ADR-11).
+- `scripts/availability-model.py` — el modelo de la sección 11, ejecutable con los MTTR
+  medidos por los instrumentos anteriores.
 
-`scripts/probe.sh` envía una petición cada 0.5 s a través de nginx, clasifica cada muestra
-como éxito o fallo según la taxonomía de la sección 7 (los `EXPECTED` **no** cuentan como
-fallo), y al terminar calcula: disponibilidad observada, número de ventanas de caída,
-MTBF, MTTR y latencias p50/p95/p99. Emite además un CSV crudo para graficar.
+### 12.2 Experimentos ejecutados y resultados reales
 
-### 12.2 Experimentos
-
-| # | Experimento | Acción | Resultado esperado | Escenario |
+| # | Experimento | Acción | Resultado medido | Escenario |
 |---|---|---|---|---|
-| E1 | Línea base | Sonda 5 min sin perturbación | 100 %; p95 < 300 ms | — |
-| E2 | Muerte de una réplica | `docker compose stop backend-1` | **0 muestras fallidas** | ESC-D1 |
-| E3 | Retorno de la réplica | `docker compose start backend-1` | Vuelve a rotación tras `readiness`; MTTR ≤ 30 s | ESC-D6 |
-| E4 | Caída del tier de datos | `docker compose stop postgres` | `login` → 503; `validate` → `degraded: true`; nodos sanos **no** se reinician | ESC-D2 |
-| E5 | Rolling upgrade | `scripts/rolling-upgrade.sh` | 0 muestras fallidas; cycle time registrado | ESC-P1 |
-| E6 | Rollback | `scripts/rollback.sh` | Reversión ≤ 2 min; sesiones intactas | ESC-P2 |
-| E7 | Fuerza bruta | 10 intentos fallidos seguidos | Bloqueo al 5.º; disponibilidad para otros usuarios sin cambio | ESC-D5 |
+| E1 | Línea base con mezcla realista | `probe.sh` 150 s, sin perturbación deliberada, con el cluster de Postgres de instancia única (Fase 3) | 126 muestras (8 login / 118 validate); 1 fallo real capturado — ver E4 | ESC-D2 |
+| E2 | Muerte de una réplica de backend | `docker kill` sobre una tarea de `backend`, vía `chaos.sh` | **28 s** de reprogramación hasta 3/3 sanas de nuevo. Repetido dos veces, mismo resultado | ESC-D1, ESC-D6 |
+| E3 | Escalado manual 3→1→3 | `docker service scale auth_backend=1` y de vuelta a `=3` | Convergencia limpia ambas veces; `liveness` en 200 antes, durante y después; sin ventana de caída | ESC-D1 |
+| E4 | Caída del tier de datos completo (instancia única, Fase 3) | `chaos.sh` detiene Postgres ~21 s durante un `probe.sh` de 150 s | **`validate`: 100 % de disponibilidad durante toda la caída.** `login`: 87.5 % (1 fallo real de 8 muestras, clasificado `FAILURE`, exactamente durante la ventana de caída). Disponibilidad global de la muestra: 99.21 % — **por debajo** del objetivo, y **así se esperaba**: una ventana de 150 s con una caída inyectada no puede demostrar un presupuesto de 52.6 min/año; para eso está el modelo de la sección 11, no la sonda | ESC-D2 |
+| E5 | Rolling upgrade con sonda concurrente | `rolling-upgrade.sh` mientras corre `probe.sh` (140 s, intervalo 0.3 s) | *Cycle time*: **115 s**. **133 muestras, 0 fallidas, 100 % de disponibilidad observada** durante el despliegue completo | ESC-P1 |
+| E6 | Rollback | `docker service rollback auth_backend` | Convergencia confirmada por el propio comando (`--detach=false`); no se midió un *cycle time* de reversión con un defecto real inyectado | ESC-P2 |
+| E7 | Fuerza bruta | 5 intentos fallidos + 1 con password correcta, contra una cuenta; una segunda cuenta en paralelo | Bloqueo exacto al 5.º intento (`423 account_locked`); la segunda cuenta autentica con normalidad — **0 % de degradación cruzada** (`AvailabilityIT`, sección 12.0) | ESC-D5 |
+| E8 | Failover del primario de Postgres, primer intento | `docker kill` sobre el primario, vía `chaos-db-failover.sh` (primera versión) | **Sin promoción**: Swarm revivió el mismo contenedor en ~8 s, más rápido que la ventana de reconexión de `repmgrd`. Resultado negativo informativo — llevó a corregir el experimento (ver ADR-11) | ESC-D7 |
+| E9 | Failover del primario de Postgres, corregido | `docker service scale =0` sobre el primario; medición hasta que un standby queda como primario; reincorporación segura del viejo primario | **MTTR = 29 s**, dos corridas independientes, mismo resultado ambas veces. `POST /api/auth/login` inmediatamente después de la promoción responde `200` sin reiniciar el backend. Reincorporación limpia del nodo demovido confirmada (sin split-brain) tras corregir el procedimiento | ESC-D7 |
+| E10 | Caída del tier de datos completo (cluster repmgr, Fase 4) | `chaos.sh` detiene los 3 nodos de Postgres a la vez, revive los 3 a la vez, con `probe.sh` (90 s) concurrente | Los 3 nodos vuelven sin divergencia (se apagaron juntos, ninguno quedó desactualizado respecto a otro) — cluster re-formado sin riesgo de split-brain. **0 muestras fallidas** en la sonda concurrente | ESC-D2, ESC-D7 |
 
-### 12.3 Plantilla de resultados
+### 12.3 Advertencia metodológica
 
-| # | Disponibilidad observada | Muestras | Fallidas | Ventanas de caída | MTTR | p95 | ¿Cumple? |
-|---|---|---|---|---|---|---|---|
-| E1 | | | | | | | |
-| E2 | | | | | | | |
-| E3 | | | | | | | |
-| E4 | | | | | | | |
-| E5 | | | | | | | |
-| E6 | | | | | | | |
-| E7 | | | | | | | |
-
-**Advertencia metodológica:** la disponibilidad medida en una ventana de minutos **no es**
-la disponibilidad anual. Una ventana corta con una caída de 20 s da cifras catastróficas;
-una sin incidentes da 100 %. Lo que estas mediciones prueban es el **comportamiento
-cualitativo** de las tácticas (¿se detectó?, ¿se recuperó?, ¿en cuánto?), y de ahí se
-alimenta el MTTR del modelo de la sección 11. La cifra anual sale del modelo, no de la
-sonda.
+La disponibilidad medida en una ventana de minutos **no es** la disponibilidad anual. E4
+lo demuestra en los dos sentidos: la muestra de 150 s dio 99.21 %, muy por debajo del
+objetivo, precisamente porque se inyectó una falla real dentro de una ventana corta — una
+ventana sin incidentes habría dado 100 %, igual de poco representativo del año completo.
+Lo que estas mediciones prueban es el **comportamiento cualitativo** de las tácticas
+(¿se detectó?, ¿se recuperó?, ¿en cuánto?), y de ahí se alimenta el MTTR del modelo de la
+sección 11. La cifra anual sale del modelo, no de la sonda — y por eso hace falta un
+modelo, no solo una sonda que corra más tiempo (harían falta meses de muestreo continuo
+para que una sonda por sí sola tuviera significancia estadística sobre un presupuesto de
+52.6 min/año).
 
 ---
 
@@ -805,53 +1094,56 @@ implementación parcial, la decisión de diseño y su ubicación.
 
 | Táctica | ¿Soportada? | Riesgo | Decisión y ubicación | Justificación |
 |---|---|---|---|---|
-| Ping/Echo | Sí | L | Actuator liveness + healthcheck Docker | Detección en ≤ 3 s |
+| Ping/Echo | Sí | L | `HEALTHCHECK` de Docker sobre `liveness`, consumido por el *routing mesh* de Swarm | Detección sin depender de un balanceador externo |
 | Monitor | Sí | L | Micrometer + `/actuator/metrics` | Base de toda medición |
-| Heartbeat | Sí | L | `@Scheduled` con `NODE_ID` | Complementa Ping/Echo |
-| Timestamp | Sí | L | `expiresAt` en sesiones | Detecta estado obsoleto |
-| Condition Monitoring | Sí | L | `DataTierHealthIndicator` | Alimenta readiness |
+| Heartbeat | Sí | L | `@Scheduled` con `NODE_ID` (hostname templado por Swarm) | Complementa Ping/Echo |
+| Timestamp | Sí | L | `exp` del JWT; `expiresAt` del refresh token | Detecta estado obsoleto |
+| Condition Monitoring | Sí | L | `DataTierHealthIndicator`; `repmgrd` sobre el primario | Alimenta readiness y ESC-D7 |
 | Sanity Checking | Sí | L | `SELECT 1` con timeout | Self-test del tier |
 | Voting | **No** | L | — | Requiere réplicas que calculen lo mismo; no aplica a este dominio |
 | Exception Detection | Sí | L | `GlobalExceptionHandler` | Ninguna excepción pasa inadvertida |
-| Self-Test | Sí | L | `SELECT 1` en cada consulta a `readiness`, no solo al iniciar | `DataTierHealthIndicator` |
-| Redundant Spare | Sí | L | 2 réplicas activas tras nginx | Base de ESC-D1 |
-| Rollback | Sí | L | `rollback.sh` | Reversión ≤ 2 min |
+| Self-Test | Sí | L | `SELECT 1` en cada consulta a `readiness` | `DataTierHealthIndicator` |
+| Redundant Spare | Sí | L | 3 réplicas de backend + 3 nodos de Postgres (Fase 4) | ESC-D1, ESC-D7 |
+| Rollback | Sí | L | `docker service rollback`, declarativo | ESC-P2 |
 | Exception Handling | Sí | L | Banda transversal | 0 stack traces expuestos |
-| Retry | Sí | M | Resilience4j, solo idempotentes | Riesgo si se extendiera a escrituras |
+| Retry | Sí | M | Resilience4j, solo idempotentes, acotado al 5 % del tráfico | Riesgo si se extendiera a escrituras |
 | Ignore Faulty Behavior | **No** | L | — | No hay fuentes externas no confiables |
-| Graceful Degradation | Sí | M | Caché local de sesiones | Inconsistencia acotada aceptada (ADR-04) |
-| Reconfiguration | **No** | M | — | Sin orquestador; la reconfiguración es manual |
+| Graceful Degradation | **No — eliminada a propósito** | — | `validate` no tiene dependencia del tier de datos que degradar (ADR-08, supera a ADR-04) | La ausencia de esta táctica es la mejora, no una carencia |
+| Reconfiguration | **Sí** *(era "No" en v1.0)* | L | Swarm reprograma tareas de `backend` caídas; `repmgrd` promueve standbys de Postgres | ESC-D1, ESC-D7 |
 | Shadow | **No** | L | — | Fuera del alcance |
-| State Resync | Parcial | M | La caché cede ante la BD al recuperarse | Sin reconciliación de logouts perdidos |
-| Escalating Restart | Parcial | M | Documentado, no automatizado | Depende del operador |
+| State Resync | Sí *(era "Parcial" en v1.0)* | L | Re-clonado (`pg_basebackup`) del nodo reincorporado tras vaciar su volumen | Ya no depende de una caché ad-hoc; es el mecanismo nativo de repmgr |
+| Escalating Restart | Parcial | M | Automatizado para caída de contenedor/proceso; la muerte de disco de un nodo no-manager sigue siendo manual (DA-7) | Documentado como límite explícito del MVP |
 | Nonstop Forwarding | **No** | L | — | Propio de elementos de red |
-| Removal from Service | Sí | L | readiness + `max_fails` en nginx | ADR-03 |
-| Transactions | Sí | L | `@Transactional(noRollbackFor = AppException.class)` en `login()` (ADR-07) | Integridad ante fallas parciales, sin deshacer el registro de un resultado EXPECTED |
-| Predictive Model | **No** | **H** | — | **Sin predicción de degradación: las fallas solo se detectan cuando ya ocurrieron** |
-| Exception Prevention | Sí | L | Bean Validation, tipos fuertes | Reduce faltas latentes |
-| Increase Competence Set | Sí | L | Bloqueo por intentos (`LockoutPolicy` + ADR-07) | Estados adversos previstos. Corregido un defecto real (rollback silencioso del contador) detectado por `AvailabilityIT`, no por inspección manual |
+| Removal from Service | Sí | L | `readiness` + *routing mesh* de Swarm | ADR-03 |
+| Transactions | Sí | L | `@Transactional(noRollbackFor = AppException.class)` en `login()` (ADR-07) | Integridad ante fallas parciales |
+| Predictive Model | **No** | **H** | — | Sin predicción de degradación: las fallas solo se detectan cuando ya ocurrieron |
+| Exception Prevention | Sí | L | Bean Validation, tipos fuertes; arranque bloqueado sin `JWT_SECRET` en `docker` (nuevo) | Reduce faltas latentes |
+| Increase Competence Set | Sí | L | Bloqueo por intentos (`LockoutPolicy` + ADR-07) | Estados adversos previstos |
 
 ### 13.2 Desplegabilidad
 
 | Táctica | ¿Soportada? | Riesgo | Decisión y ubicación |
 |---|---|---|---|
-| Scale Rollouts | Sí | L | Rolling upgrade réplica por réplica |
-| Rollback | Sí | L | `rollback.sh` por etiqueta |
-| Script Deployment Commands | Sí | L | Todo el despliegue está guionado |
+| Scale Rollouts | Sí | L | `update_config` de Swarm, declarativo (antes: orquestado a mano por un script) |
+| Rollback | Sí | L | `docker service rollback` |
+| Script Deployment Commands | Sí | L | Todo el despliegue está guionado (`deploy.sh`) |
 | Manage Service Interactions | Parcial | M | Graceful shutdown; sin versionado de API |
 | Package Dependencies | Sí | L | Imagen multietapa |
 | Feature Toggle | Sí | L | Variables de entorno |
 | Canary Testing | **No** | M | Requiere enrutamiento por porcentaje |
 | A/B Testing | **No** | L | Fuera del alcance |
-| Blue-Green | Parcial | L | Se optó por rolling; blue-green necesitaría duplicar el stack |
+| Blue-Green | Parcial | L | Se optó por rolling declarativo; blue-green necesitaría duplicar el stack |
 
 ### 13.3 Riesgos altos detectados
 
-**R-1 (Alto) — Ausencia de Predictive Model.** El sistema solo reacciona a fallas
-consumadas. No hay detección de tendencias (crecimiento del pool de conexiones, latencia
-en aumento, memoria). En términos del Capítulo 4, todo el esfuerzo está en *detectar* y
-*recuperar*, y muy poco en *prevenir*. Con MTTR de una hora, prevenir vale más que
-recuperar.
+**R-1 (Alto) — Ausencia de Predictive Model.** Sin cambios respecto a v1.0: el sistema
+solo reacciona a fallas consumadas, no hay detección de tendencias.
+
+**R-2 (Alto, nuevo en v2.0) — Split-brain en Postgres si se reincorpora un nodo sin
+vaciar su volumen.** Confirmado en vivo durante la construcción de la Fase 4 (ADR-11).
+Mitigado en el procedimiento automatizado (`chaos-db-failover.sh`), **no** mitigado a
+nivel de infraestructura: un operador que revive un nodo demovido a mano, sin seguir el
+procedimiento, puede reproducir el incidente. Queda como riesgo operacional documentado.
 
 ---
 
@@ -860,25 +1152,34 @@ recuperar.
 ### 14.1 Deuda asumida conscientemente
 
 El Capítulo 3 define la deuda arquitectónica como el deterioro gradual del diseño. La
-deuda deliberada y registrada es gestionable; la no documentada es la peligrosa. Se
-registra:
+deuda deliberada y registrada es gestionable; la no documentada es la peligrosa.
 
-| # | Deuda | Motivo | Costo de saldarla |
-|---|---|---|---|
-| DA-1 | nginx es SPOF | RE-5: un solo host | Alto: requiere IP virtual y segundo balanceador |
-| DA-2 | PostgreSQL es SPOF | RE-5, RE-6 | Alto: réplica en espera y failover automático |
-| DA-3 | Caché de sesiones local por réplica | ADR-04 | Medio: caché distribuida (Redis) — que a su vez sería otro SPOF |
-| DA-4 | Sin versionado de la API | Alcance del taller | Bajo si se hace ahora, alto después |
-| DA-5 | Escalating Restart manual | Sin orquestador | Medio: migrar a Kubernetes |
-| DA-6 | Tier de datos no es servicio propio | ADR-02 | Medio, y acotado por el patrón Repositorio |
+| # | Deuda | Estado en v2.0 | Motivo | Costo de saldarla |
+|---|---|---|---|---|
+| DA-1 | nginx es SPOF | **Resuelta** (ADR-10) | — | — |
+| DA-2 | PostgreSQL es SPOF | **Reforzada, no eliminada del todo** (ADR-11) | RE-6: MVP con volúmenes locales | Ver DA-7 |
+| DA-3 | Caché de sesiones local por réplica | **Eliminada** (ADR-08 supera a ADR-04) | — | — |
+| DA-4 | Sin versionado de la API | Vigente | Alcance del taller | Bajo si se hace ahora, alto después |
+| DA-5 | Escalating Restart manual | **Reducida** (ADR-09, ADR-11): automática para caída de proceso, manual solo para pérdida de disco | Sin StatefulSets en Swarm | Ver DA-7 |
+| DA-6 | Tier de datos no es servicio propio | Vigente (ADR-02) | Alcance del taller | Medio, acotado por Repository |
+| DA-7 | **Nueva.** Volúmenes de Postgres locales al nodo Swarm: la muerte de un nodo no-manager pierde su disco | Documentada, no resuelta | RE-6, alcance de MVP; Swarm no tiene volúmenes distribuidos nativos | Alto: requiere NFS/EBS/CSI o migrar a Kubernetes con StorageClass |
+| DA-8 | **Nueva.** Split-brain posible si se reincorpora un nodo de Postgres sin seguir el procedimiento de vaciado de volumen | Mitigada en script, no en infraestructura | Bitnami reutiliza el `PGDATA` existente sin verificar el estado del cluster | Medio: un *sidecar* o *init container* que verifique el rol antes de arrancar |
 
 ### 14.2 Trabajo futuro, priorizado por impacto en el objetivo
 
-1. **Eliminar los SPOF** (DA-1, DA-2). Es lo único que mueve la cifra de la sección 11.
-2. **Reducir el MTTR** con conmutación automática. Segundo en impacto y probablemente más
-   barato que lo anterior.
-3. **Predictive Model** (R-1): alertas sobre tendencias, no solo sobre caídas.
-4. Canary testing, que requiere enrutamiento por porcentaje en el balanceador.
+Con RE-3 cumplido (sección 11), la priorización cambia respecto a v1.0: ya no se trata de
+alcanzar el objetivo, sino de reducir deuda y ampliar robustez.
+
+1. **DA-7 (almacenamiento distribuido para Postgres)** — es la única deuda que, si se
+   materializa (muerte de un nodo no-manager), regresa al escenario de ~1 h de
+   intervención manual. Máxima prioridad porque es la única que puede volver a poner en
+   riesgo RE-3.
+2. **DA-8 (verificación de rol antes de rejoin)** — mitigar en infraestructura lo que hoy
+   solo mitiga el script de chaos, para que el mismo error no dependa de que un operador
+   humano use la herramienta correcta.
+3. **Predictive Model (R-1)** — sin cambios respecto a v1.0: alertas sobre tendencias, no
+   solo sobre caídas.
+4. Canary testing, que requiere enrutamiento por porcentaje.
 5. Versionado de la API antes de que existan clientes que no se puedan actualizar.
 
 ---
@@ -887,15 +1188,16 @@ registra:
 
 | Escenario | Táctica principal | Decisión | Ubicación en el código | Experimento |
 |---|---|---|---|---|
-| ESC-D1 | Redundant Spare | ADR-01 | `docker-compose.yml`, `nginx.conf` | E2 |
-| ESC-D2 | Graceful Degradation | ADR-04 | `TokenService` (`validateFallback`, caché local) | E4 |
-| ESC-D3 | Retry + Circuit Breaker | ADR-05 | `TokenService`/`AuthService` (`@Retry`/`@CircuitBreaker`), `ResilienceConfig` (log de transiciones), `application.yml` | E4 |
-| ESC-D4 | Exception Detection | — | `GlobalExceptionHandler` | E1 |
+| ESC-D1 | Redundant Spare + Reconfiguration | ADR-09 | `stack.yml` (`backend.deploy`) | E2, E3 |
+| ESC-D2 | Eliminación de la dependencia (no degradación) | ADR-08 | `TokenService.validateAccessToken` | E1, E4, E10 |
+| ESC-D3 | Retry + Circuit Breaker | ADR-05 | `TokenService`/`AuthService` (`@Retry`/`@CircuitBreaker`), `ResilienceConfig`, `application.yml` | E4 |
+| ESC-D4 | Exception Detection | — | `GlobalExceptionHandler` | `./mvnw test` |
 | ESC-D5 | Increase Competence Set | ADR-07 | `LockoutPolicy`, `AuthService` (`noRollbackFor`) | E7, `AvailabilityIT` |
-| ESC-D6 | Removal from Service | ADR-03 | `DataTierHealthIndicator`, `nginx.conf` | E3 |
-| ESC-P1 | Scale Rollouts | ADR-06 | `scripts/rolling-upgrade.sh` | E5 |
-| ESC-P2 | Rollback | ADR-06 | `scripts/rollback.sh` | E6 |
-| ESC-P3 | Feature Toggle | ADR-06 | `application.yml`, `TokenService`, `DiagnosticsController` | — |
+| ESC-D6 | Removal from Service | ADR-03 | `DataTierHealthIndicator`, `stack.yml` (`healthcheck`) | E2 |
+| ESC-D7 | Leader Election + Reconfiguration | ADR-11 | `stack.yml` (`postgres-1/2/3`), `application-docker.yml` (`POSTGRES_HOSTS`) | E8, E9 |
+| ESC-P1 | Scale Rollouts | ADR-09 | `stack.yml` (`update_config`), `scripts/rolling-upgrade.sh` | E5 |
+| ESC-P2 | Rollback | ADR-09 | `scripts/rollback.sh` | E6 |
+| ESC-P3 | Feature Toggle | ADR-06 | `application.yml`, `DiagnosticsController` | — |
 
 ---
 
@@ -913,9 +1215,18 @@ registra:
 | **Táctica** | Decisión de diseño puntual que afecta la respuesta ante un estímulo de un atributo de calidad |
 | **Patrón** | Solución recurrente y probada que agrupa varias tácticas |
 | **Escenario de atributo de calidad** | Especificación de seis partes: fuente, estímulo, artefacto, entorno, respuesta y medida |
+| **Routing mesh** | Balanceo de carga nativo de Docker Swarm entre las tareas sanas de un servicio, sin un componente de balanceo desplegado por separado |
+| **repmgr / repmgrd** | Herramienta y demonio de replicación y gestión de failover para PostgreSQL; elige un primario y promueve standbys automáticamente |
+| **Split-brain** | Estado inconsistente en el que más de un nodo de un cluster con estado cree ser la autoridad (el primario), aceptando escrituras divergentes |
+| **`targetServerType`** | Parámetro del driver JDBC de PostgreSQL que, con una URL multi-host, selecciona a qué host conectarse según su rol (`primary`, `secondary`, etc.) |
 
 ## Anexo B — Referencias
 
 - Bass, L., Clements, P., & Kazman, R. *Software Architecture in Practice*, 4.ª ed.
   Addison-Wesley. Capítulos 1–5.
 - Documentación de Spring Boot Actuator y Resilience4j.
+- Documentación de Docker Swarm (`docker stack deploy`, *routing mesh*, `docker service
+  update`).
+- Documentación de `repmgr` (EnterpriseDB) y de la imagen `bitnamilegacy/postgresql-repmgr`.
+- `io.jsonwebtoken` (jjwt) — documentación de la librería usada para firmar y verificar
+  los JWT de acceso.
