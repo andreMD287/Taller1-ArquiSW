@@ -22,19 +22,36 @@ formas que un monolito nunca tiene que enfrentar (timeout, conexión rechazada,
 nodo caído). Todo el trabajo de disponibilidad (Cap. 4) existe por esas dos
 líneas.
 
-## Arranque en un comando
+## Arranque
+
+### Despliegue real: Docker Swarm (`stack.yml`)
+
+```bash
+./scripts/deploy.sh
+```
+
+Un solo comando, tanto para evaluar en un portátil de un solo nodo como para
+la demo de alta disponibilidad en varios: inicializa el swarm si hace falta,
+genera los secrets (`jwt_secret`, `postgres_password`) si no existen, construye
+la imagen y despliega `stack.yml`. La API queda expuesta en
+`http://localhost:8080`, balanceada por el *routing mesh* de Swarm entre las 3
+réplicas del backend — **mismo archivo de despliegue** en 1 nodo o en N (ver
+`stack.yml` para el detalle de por qué Swarm y no Kubernetes ni el
+docker-compose de desarrollo).
+
+Para sumar nodos reales a la demo: `docker swarm join-token worker` en el
+nodo donde corriste `deploy.sh`, y el comando que imprime en cada nodo nuevo.
+
+### Desarrollo local: `docker-compose.yml`
 
 ```bash
 docker compose up --build
 ```
 
-Esto levanta `postgres`, `backend-1`, `backend-2` (misma imagen, distinto
-`NODE_ID`) y `nginx` como balanceador delante de las dos réplicas. La API
-queda expuesta en:
-
-```
-http://localhost:8080
-```
+Levanta `postgres`, `backend-1`, `backend-2` (misma imagen, distinto
+`NODE_ID`) y `nginx` como balanceador delante de las dos réplicas, en
+`http://localhost:8080`. Pensado para iterar en el backend sin depender de
+Swarm; **no** es el despliegue que se evalúa (ver arriba).
 
 Para correr solo el backend en desarrollo, sin Docker, contra H2:
 
@@ -78,12 +95,12 @@ códigos.
 
 | Variable | Default | Uso |
 |---|---|---|
-| `NODE_ID` | `local` | Identifica el nodo en logs/métricas (relevante con 2+ réplicas) |
+| `NODE_ID` | `$HOSTNAME`, o `local` si tampoco hay hostname | Identifica el nodo/réplica en logs y métricas. En `stack.yml` no se fija a mano: cada tarea de Swarm resuelve su propio hostname templado (`backend-{{.Task.Slot}}`) y eso basta. |
 | `POSTGRES_DB` | `authdb` | Nombre de la base |
 | `POSTGRES_USER` | `auth` (docker) | Usuario de conexión a Postgres |
-| `POSTGRES_PASSWORD` | `auth` (docker) | Password de conexión a Postgres |
-| `SPRING_PROFILES_ACTIVE` | — | `docker` en compose, `test` para tests/desarrollo local con H2 |
-| `JWT_SECRET` | — (ver abajo) | Clave HMAC-SHA256 para firmar/verificar el access token. **Obligatoria** en el perfil `docker`: sin ella la app se niega a arrancar. `docker-compose.yml` trae un default de conveniencia solo para que el evaluador no tenga que configurar nada; en cualquier despliegue real, expórtala antes de levantar el stack. Mínimo 32 bytes. |
+| `POSTGRES_PASSWORD` | `auth` (docker-compose) / secret `postgres_password` (Swarm) | Password de conexión a Postgres |
+| `SPRING_PROFILES_ACTIVE` | — | `docker` en compose y en Swarm, `test` para tests/desarrollo local con H2 |
+| `JWT_SECRET` | secret `jwt_secret` (Swarm) / default de conveniencia (docker-compose) | Clave HMAC-SHA256 para firmar/verificar el access token. **Obligatoria** en el perfil `docker`: sin ella la app se niega a arrancar. En `stack.yml` viene de un Docker secret generado por `deploy.sh` (nunca de una variable de entorno plana); `docker-compose.yml` trae un default de conveniencia solo para desarrollo local. Mínimo 32 bytes. |
 | `JWT_TTL_SECONDS` | `900` (15 min) | TTL del access token. Corto a propósito: acota la ventana de un token robado, dado que un JWT no se puede revocar antes de expirar. |
 | `JWT_REFRESH_TTL_SECONDS` | `604800` (7 días) | TTL del refresh token, que sí es revocable vía `/logout` porque vive en la BD. |
 
@@ -112,15 +129,24 @@ independencia del tier de datos.
 
 ## Scripts (`scripts/`)
 
+Para el stack en Swarm (`stack.yml`):
+
+- `deploy.sh` — despliegue de un comando: swarm init, secrets, build, `stack
+  deploy`. Ver "Arranque" arriba.
+- `rolling-upgrade.sh` — construye una imagen nueva y hace `docker service
+  update` sobre `auth_backend`; Swarm decide el orden (`update_config` en
+  `stack.yml`: 1 réplica a la vez, `start-first`, rollback automático si el
+  healthcheck de liveness falla). Imprime el cycle time total.
+- `rollback.sh` — `docker service rollback auth_backend`: vuelve a la última
+  versión estable en un comando, sin reetiquetar imágenes a mano.
+
+Para el `docker-compose.yml` de desarrollo local:
+
 - `probe.sh [segundos]` — sonda de disponibilidad a través de nginx; calcula
   disponibilidad observada, MTBF/MTTR y percentiles de latencia, y deja un
   CSV crudo.
 - `chaos-kill.sh` — mata `backend-1`, lo revive, y luego apaga Postgres, para
   correr en paralelo con `probe.sh` durante la demo.
-- `rolling-upgrade.sh` — actualiza `backend-1`, espera su `readiness`, y solo
-  entonces actualiza `backend-2`. Imprime el cycle time total.
-- `rollback.sh [tag]` — vuelve a la imagen etiquetada anterior (por defecto
-  `previous`, que `rolling-upgrade.sh` deja como respaldo automático).
 
 ## Distinción de examen: liveness vs. readiness
 

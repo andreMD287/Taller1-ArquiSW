@@ -1,0 +1,119 @@
+version: "3.8"
+
+# ADR: Docker Swarm en vez de Kubernetes o del docker-compose.yml de
+# desarrollo. Este archivo es EL MISMO para el evaluador (1 nodo) y para la
+# demo de alta disponibilidad (N nodos): "docker stack deploy -c stack.yml"
+# no cambia con la topologia. Resuelve el conflicto entre los dos atributos
+# de calidad exigidos -alta disponibilidad y despliegue sencillo- sin exigir
+# un cluster multi-nodo para poder evaluar el entregable.
+#
+# Lo que Swarm aporta nativamente sobre el docker-compose.yml anterior:
+# - routing mesh: reemplaza a nginx como balanceador. Ya no hay una unica
+#   instancia de balanceador que sea un SPOF.
+# - reprogramacion automatica de tareas caidas (Reconfiguration, Cap. 4):
+#   nadie corre "docker compose up" a mano cuando un nodo muere.
+# - rolling update con healthcheck y rollback automatico (ver
+#   backend.deploy.update_config): Removal from Service + Redundant Spare
+#   (Cap. 4), declarativo en vez de orquestado por rolling-upgrade.sh a mano.
+#
+# Swarm NO soporta "depends_on" con condiciones de arranque (a diferencia de
+# docker-compose): por diseno, el backend debe tolerar que Postgres no este
+# listo todavia al arrancar. Eso ya lo cubren el Retry/CircuitBreaker de
+# ResilienceConfig, asi que no hace falta orquestar el orden de arranque.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: authdb
+      POSTGRES_USER: auth
+      # el propio entrypoint de la imagen oficial de postgres sabe leer
+      # variables *_FILE: no hace falta un wrapper propio para este servicio.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth -d authdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - auth-net
+    deploy:
+      replicas: 1
+      # "pgdata" es un volumen local al nodo: fijar el servicio al manager
+      # evita que Swarm lo reprograme a un nodo sin los datos si el manager
+      # sigue vivo. Es refuerzo, no HA real de datos (eso es la Fase 4,
+      # recortable); si el nodo manager muere, este servicio no se reubica.
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: any
+
+  backend:
+    image: auth-backend:latest
+    # Swarm templa el hostname por tarea (backend-1, backend-2, backend-3...):
+    # es la fuente del NODE_ID que aparece en logs/metricas, sin hardcodear
+    # nada por replica (ver application.yml: node.id cae a $HOSTNAME).
+    hostname: "backend-{{.Task.Slot}}"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      POSTGRES_DB: authdb
+      POSTGRES_USER: auth
+    secrets:
+      - jwt_secret
+      - postgres_password
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health/liveness"]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+    ports:
+      # modo ingress (default): el routing mesh de Swarm balancea entre
+      # TODAS las replicas sanas del servicio desde cualquier nodo del
+      # cluster. Sustituye por completo a nginx.
+      - target: 8080
+        published: 8080
+        protocol: tcp
+        mode: ingress
+    networks:
+      - auth-net
+    deploy:
+      replicas: 3
+      # reparte las replicas entre los nodos disponibles; con 1 solo nodo
+      # (evaluador) las 3 caen ahi igual. Redundant Spare (active), Cap. 4.
+      placement:
+        preferences:
+          - spread: node.hostname
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+        monitor: 30s
+        delay: 5s
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+      restart_policy:
+        condition: any
+
+networks:
+  auth-net:
+    driver: overlay
+
+volumes:
+  pgdata:
+
+secrets:
+  # creados por scripts/deploy.sh antes del "stack deploy" (docker secret
+  # create); "external: true" le dice a Swarm que no los genere, que ya
+  # deben existir. Nunca viajan como variable de entorno plana en este
+  # archivo (a diferencia de docker-compose.yml, pensado solo para dev local).
+  jwt_secret:
+    external: true
+  postgres_password:
+    external: true

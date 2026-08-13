@@ -28,15 +28,20 @@ RUN apt-get update \
 RUN groupadd -r auth && useradd -r -g auth -d /app auth
 
 COPY --from=build /app/target/auth-0.0.1-SNAPSHOT.jar app.jar
-RUN chown auth:auth app.jar
+COPY docker-entrypoint.sh docker-entrypoint.sh
+RUN chown auth:auth app.jar docker-entrypoint.sh && chmod +x docker-entrypoint.sh
 USER auth
 
 EXPOSE 8080
 
 # El HEALTHCHECK apunta a LIVENESS, nunca a readiness: si dependiera del
-# tier de datos, Docker reiniciaria contenedores sanos cuando Postgres cae,
-# exactamente la cascada que DataTierHealthIndicator evita a proposito.
+# tier de datos, Docker (y en Swarm, el orquestador) reiniciaria contenedores
+# sanos cuando Postgres cae, exactamente la cascada que DataTierHealthIndicator
+# evita a proposito.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:8080/actuator/health/liveness || exit 1
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# docker-entrypoint.sh hidrata JWT_SECRET/POSTGRES_PASSWORD desde Docker
+# secrets cuando estan montados (Swarm) y cae en las variables de entorno
+# planas cuando no (docker-compose de desarrollo).
+ENTRYPOINT ["./docker-entrypoint.sh"]

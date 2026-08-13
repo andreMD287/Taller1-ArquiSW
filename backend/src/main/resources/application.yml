@@ -116,8 +116,11 @@ features:
   new-dashboard: false
 
 node:
-  # identifica el nodo en logs/metricas cuando hay varias replicas detras de nginx.
-  id: ${NODE_ID:local}
+  # identifica el nodo/replica en logs y metricas. Si NODE_ID no esta seteado
+  # (Swarm, en vez de fijarlo a mano por replica) cae al HOSTNAME del
+  # contenedor, que en stack.yml se templa como "backend-{{.Task.Slot}}":
+  # cada tarea de Swarm queda identificada sin hardcodear nada por replica.
+  id: ${NODE_ID:${HOSTNAME:local}}
 
 logging:
   level:
