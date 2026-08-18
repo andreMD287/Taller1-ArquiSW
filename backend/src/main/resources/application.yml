@@ -114,6 +114,17 @@ app:
 # Feature toggles: desacoplan el despliegue del release (Cap. 5).
 features:
   new-dashboard: false
+  # Toggles de reglas de negocio de producto (ADR-005). Convencion: una regla
+  # nueva se anota con
+  #   @ConditionalOnProperty(name = "features.rules.<nombre>", havingValue = "true")
+  # y se lista aqui. Apagada, la regla NO llega a instanciarse como bean: no
+  # cuesta nada en ejecucion, a diferencia de un if dentro del metodo.
+  #
+  # Las reglas centrales (precio > 0, stock >= 0) NO son toggleables a
+  # proposito: son invariantes del negocio, no funcionalidad en despliegue
+  # progresivo. Un toggle que permita apagar "el stock no puede ser negativo"
+  # es un agujero de safety, no flexibilidad.
+  rules: {}
 
 node:
   # identifica el nodo/replica en logs y metricas. Si NODE_ID no esta seteado
