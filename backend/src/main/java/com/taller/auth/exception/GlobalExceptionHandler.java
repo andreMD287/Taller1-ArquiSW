@@ -1,6 +1,7 @@
 package com.taller.auth.exception;
 
 import com.taller.auth.dto.ErrorResponse;
+import com.taller.auth.dto.FieldViolation;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
@@ -12,6 +13,8 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.util.List;
 
 /**
  * Banda transversal "Exceptions" del diagrama del taller: cruza los tres
@@ -32,6 +35,19 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(AppException.class)
     public ResponseEntity<ErrorResponse> handleAppException(AppException ex) {
         return respond(ex.getStatus(), ex.getCode(), ex.getKind(), ex.getMessage(), ex.isRetryable(), null);
+    }
+
+    /**
+     * Taller 2 (ADR-007). Mas especifico que handleAppException, asi que Spring
+     * lo prefiere para esta subclase. Existe solo para adjuntar la lista de
+     * violaciones: el resto del tratamiento (metrica por kind, requestId, log)
+     * es identico, porque una violacion de regla de negocio es EXPECTED igual
+     * que unas credenciales invalidas.
+     */
+    @ExceptionHandler(BusinessRuleViolationException.class)
+    public ResponseEntity<ErrorResponse> handleBusinessRuleViolation(BusinessRuleViolationException ex) {
+        return respond(ex.getStatus(), ex.getCode(), ex.getKind(), ex.getMessage(), ex.isRetryable(),
+                null, ex.getViolations());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -72,13 +88,19 @@ public class GlobalExceptionHandler {
 
     private ResponseEntity<ErrorResponse> respond(HttpStatus status, String code, FaultKind kind,
                                                     String message, boolean retryable, String detail) {
+        return respond(status, code, kind, message, retryable, detail, null);
+    }
+
+    private ResponseEntity<ErrorResponse> respond(HttpStatus status, String code, FaultKind kind,
+                                                    String message, boolean retryable, String detail,
+                                                    List<FieldViolation> violations) {
         String requestId = MDC.get("requestId");
         // un contador por kind (errors.expected/fault/error/failure) es lo que permite
         // separar "credenciales malas" de una caida real al calcular disponibilidad.
         meterRegistry.counter("errors." + kind.name().toLowerCase(), "code", code).increment();
         log.warn("event=error_response code={} kind={} status={} requestId={}",
                 code, kind, status.value(), requestId);
-        ErrorResponse body = new ErrorResponse(code, kind, message, retryable, requestId, detail);
+        ErrorResponse body = new ErrorResponse(code, kind, message, retryable, requestId, detail, violations);
         return ResponseEntity.status(status).body(body);
     }
 }
