@@ -541,5 +541,80 @@ toca ni el módulo de usuarios ni el frontend— queda demostrada.
 | # | Tema | Estado |
 |---|---|---|
 | ADR-008 | Unicidad de producto por nombre — **revisable**: si más adelante se agrega un SKU/código propio, la unicidad debería moverse a ese campo | Registrada, revisable |
+| ADR-009 | **Alcance** de la unicidad de nombre: ¿se libera el nombre de un producto eliminado? | **Abierta — decisión de Rol 1** |
 | — | `ProductService` y controllers REST de Producto | **Bloqueado**: requiere `ProductRepository` de Rol 2 |
 | — | CRUD de Usuario (roles, soft delete, último ADMIN) | **Bloqueado**: requiere `role`/`active` en `User` y la taxonomía de roles de Rol 2 |
+
+---
+
+## ADR-009 (ABIERTA) — Alcance de la unicidad de nombre frente al borrado lógico
+
+**Estado:** Pendiente de decisión de Rol 1.
+
+Rol 2 confirmó que pondrá `UNIQUE` sobre `name` en la migración, y su
+`existsByName` no filtra por `active`. Ambas cosas son coherentes entre sí, pero
+juntas implican una consecuencia que todavía nadie decidió a propósito: **el
+nombre de un producto dado de baja queda bloqueado para siempre.** Lo mismo
+aplicará a `username` cuando `User` tenga `active`.
+
+| Opción | Implicación en BD (Rol 2) | Implicación en la regla (Rol 1) |
+|---|---|---|
+| **Nombres quemados** — un nombre usado nunca se libera | `UNIQUE (name)` global, que es lo que Rol 2 ya planeó | La regla usa `existsByName` |
+| **Nombre reutilizable** — solo los activos compiten | `CREATE UNIQUE INDEX ... ON products(name) WHERE active` (índice parcial de Postgres) | La regla usa `existsByNameAndActiveTrue` |
+
+**Por qué hay que decidirlo antes de que Rol 2 escriba la migración:** si la regla
+del backend y la constraint de la base expresan alcances distintos, la validación
+diría que el nombre está libre y el `INSERT` reventaría igual con
+`DataIntegrityViolationException`. Las dos capas tienen que decir lo mismo, igual
+que con `stock >= 0`.
+
+Separación de responsabilidades: **la semántica es de Rol 1** (qué significa
+"único"), **el mecanismo es de Rol 2** (constraint global vs. índice parcial).
+
+---
+
+## Nota sobre ADR-004 — costo asumido del `CHECK (price > 0)`
+
+Rol 2 confirmó que reforzará también `price > 0` como constraint en la migración,
+además de `stock >= 0` y la unicidad de nombre.
+
+Es defensa en profundidad y no se revierte, pero se registra el costo: la
+justificación de ADR-004 para ubicar `precio > 0` en el motor de reglas y no en
+Bean Validation fue precisamente que **es una regla de negocio que podría
+cambiar** (productos gratuitos en promoción). Con un `CHECK` en base de datos,
+ese cambio futuro pasa a requerir además una migración de Flyway.
+
+Con `stock >= 0` no hay tensión alguna: ese sí es un invariante permanente, y
+duplicarlo en la base es puro beneficio.
+
+---
+
+## Pendientes con Rol 2 al momento de la pausa
+
+Confirmado por Rol 2:
+
+- Trabaja sobre `product/domain/Product.java`, sin crear otra entidad.
+- `ProductRepository` es su primera entrega, para desbloquear `ProductService`.
+- Refuerza en Postgres: `CHECK (stock >= 0)`, `CHECK (price > 0)`, `UNIQUE(name)`.
+- Filtrado de soft-delete por **métodos explícitos**, no `@Where` (cierra el
+  punto 3 del checklist **solo para `Product`**).
+
+Sin respuesta todavía:
+
+1. **Soft-delete en `User`** — el punto 3 se respondió solo para `Product`. Hoy
+   `AuthService.login()` usa `findByUsername()`, que no filtra: cuando `User`
+   tenga `active`, **un usuario eliminado podrá seguir iniciando sesión**. Falta
+   decidir entre `findByUsernameAndActiveTrue` o el chequeo en el service.
+2. **Firma explícita de la búsqueda paginada**, que también debe filtrar activos:
+   `Page<Product> findByNameContainingIgnoreCaseAndActiveTrue(String, Pageable)`.
+3. **Punto 7 del checklist** — mecanismo anti-condición-de-carrera del último
+   ADMIN. "Validación transaccional" con `READ_COMMITTED` no impide que dos
+   admins eliminándose a la vez dejen el sistema en 0.
+4. **`role` y `active` en `User`**, taxonomía de roles, filtro JWT y
+   `@EnableMethodSecurity`. Sin los dos últimos, los `@PreAuthorize` que se
+   escriban **se ignoran en silencio**.
+
+Riesgo asumido por la elección de métodos explícitos: `ProductRepository` hereda
+de `JpaRepository` los métodos `findAll()`, `findById()` y `findAll(Pageable)`,
+que **no filtran por `active`**. El filtro no es estructural — depende de la
+disciplina de quien llama. Se cubrirá con un test cuando exista el repositorio.
