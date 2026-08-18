@@ -1,18 +1,22 @@
 package com.taller.auth.model;
 
+import java.time.Instant;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 
-import java.time.Instant;
-
 /**
- * Cuenta de usuario. El estado de bloqueo (failedAttempts / lockedUntil) vive
- * aqui, no en memoria: si el nodo se reinicia, el bloqueo por fuerza bruta
- * sobrevive porque esta en el tier de datos.
+ * Cuenta de usuario.
+ *
+ * El estado de bloqueo vive en persistencia para sobrevivir reinicios.
+ * El borrado es logico mediante active=false.
+ * Cada usuario posee un unico rol: USER o ADMIN.
  */
 @Entity
 @Table(name = "users")
@@ -28,6 +32,13 @@ public class User {
     @Column(name = "password_hash", nullable = false, length = 100)
     private String passwordHash;
 
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private Role role;
+
+    @Column(nullable = false)
+    private boolean active;
+
     @Column(name = "failed_attempts", nullable = false)
     private int failedAttempts;
 
@@ -41,9 +52,14 @@ public class User {
         // requerido por JPA
     }
 
+    /**
+     * Todo usuario creado por el flujo normal nace como USER activo.
+     */
     public User(String username, String passwordHash) {
         this.username = username;
         this.passwordHash = passwordHash;
+        this.role = Role.USER;
+        this.active = true;
         this.failedAttempts = 0;
         this.createdAt = Instant.now();
     }
@@ -56,12 +72,35 @@ public class User {
         return username;
     }
 
+    public void setUsername(String username) {
+        this.username = username;
+    }
+
     public String getPasswordHash() {
         return passwordHash;
     }
 
     public void setPasswordHash(String passwordHash) {
         this.passwordHash = passwordHash;
+    }
+
+    public Role getRole() {
+        return role;
+    }
+
+    public void setRole(Role role) {
+        this.role = role;
+    }
+
+    public boolean isActive() {
+        return active;
+    }
+
+    /**
+     * Borrado logico.
+     */
+    public void deactivate() {
+        this.active = false;
     }
 
     public int getFailedAttempts() {
