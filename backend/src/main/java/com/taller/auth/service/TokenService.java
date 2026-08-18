@@ -105,7 +105,7 @@ public class TokenService {
     @Transactional
     public TokenPair issue(User user) {
         Instant now = Instant.now();
-        String accessToken = buildAccessToken(user.getUsername(), now);
+        String accessToken = buildAccessToken(user.getId(), user.getUsername(), now);
         RefreshTokenEntity refresh = persistRefreshToken(user.getId(), user.getUsername(), now);
         return new TokenPair(accessToken, refresh.getToken(), user.getUsername(),
                 now.plusSeconds(accessTtlSeconds), refresh.getExpiresAt());
@@ -128,10 +128,16 @@ public class TokenService {
             Claims claims = Jwts.parser().verifyWith(signingKey).build()
                     .parseSignedClaims(token)
                     .getPayload();
-            return new AccessClaims(claims.getSubject(), claims.getExpiration().toInstant());
+            return new AccessClaims(Long.valueOf(claims.getSubject()),
+                    claims.get("username", String.class),
+                    claims.getExpiration().toInstant());
         } catch (JwtException | IllegalArgumentException e) {
             // firma invalida, token mal formado o expirado: EXPECTED, no es
             // una caida de nada, es la definicion misma de "sesion invalida".
+            // NumberFormatException (un token viejo cuyo subject era el
+            // username, no el ID) es IllegalArgumentException y cae aqui: un
+            // token del formato anterior se rechaza como sesion invalida en
+            // vez de reventar con un 500.
             throw new InvalidSessionException();
         }
     }
@@ -148,7 +154,7 @@ public class TokenService {
         if (stored.isExpired(now)) {
             throw new InvalidSessionException();
         }
-        String accessToken = buildAccessToken(stored.getUsername(), now);
+        String accessToken = buildAccessToken(stored.getUserId(), stored.getUsername(), now);
         RefreshTokenEntity newRefresh = persistRefreshToken(stored.getUserId(), stored.getUsername(), now);
         return new TokenPair(accessToken, newRefresh.getToken(), stored.getUsername(),
                 now.plusSeconds(accessTtlSeconds), newRefresh.getExpiresAt());
@@ -189,9 +195,20 @@ public class TokenService {
         return refreshTokenRepository.save(entity);
     }
 
-    private String buildAccessToken(String username, Instant now) {
+    /**
+     * El subject es el ID del usuario, NO su username. Razon (Taller 2): el
+     * username es mutable -un usuario puede cambiarlo desde su perfil- y si
+     * fuera el subject, todo token vigente en ese momento (hasta 15 min)
+     * quedaria apuntando a un identificador que ya no resuelve a nadie. El ID
+     * es inmutable, asi que el cambio de username deja de ser un evento que
+     * invalida sesiones. El username viaja como claim aparte porque los
+     * consumidores (validate, el frontend) lo quieren para mostrarlo, no para
+     * identificar.
+     */
+    private String buildAccessToken(Long userId, String username, Instant now) {
         return Jwts.builder()
-                .subject(username)
+                .subject(String.valueOf(userId))
+                .claim("username", username)
                 .id(UUID.randomUUID().toString())
                 .issuer(ISSUER)
                 .issuedAt(Date.from(now))
@@ -210,7 +227,12 @@ public class TokenService {
                              Instant accessExpiresAt, Instant refreshExpiresAt) {
     }
 
-    public record AccessClaims(String username, Instant expiresAt) {
+    /**
+     * userId es la identidad real del portador (subject del JWT); username es
+     * solo informativo y puede haber cambiado despues de emitirse el token.
+     * Toda autorizacion debe apoyarse en userId, nunca en username.
+     */
+    public record AccessClaims(Long userId, String username, Instant expiresAt) {
     }
 
     public record RevokeResult(boolean revoked, String note) {

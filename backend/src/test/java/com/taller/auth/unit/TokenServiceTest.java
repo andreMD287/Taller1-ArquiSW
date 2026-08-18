@@ -5,6 +5,8 @@ import com.taller.auth.model.RefreshTokenEntity;
 import com.taller.auth.model.User;
 import com.taller.auth.repository.RefreshTokenRepository;
 import com.taller.auth.service.TokenService;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -12,7 +14,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.mock.env.MockEnvironment;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Date;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -72,6 +76,51 @@ class TokenServiceTest {
 
         assertThat(pair.refreshToken()).hasSize(64); // 32 bytes en hex = 64 caracteres
         assertThat(pair.refreshExpiresAt()).isAfter(before.plusSeconds(REFRESH_TTL_SECONDS - 5));
+    }
+
+    // Taller 2: el subject debe ser el ID, porque el username es mutable. Si
+    // alguien revierte buildAccessToken a .subject(username), este test cae.
+    @Test
+    void elSubjectDelJwtEsElIdDelUsuarioNoSuUsername() {
+        when(refreshTokenRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        String accessToken = tokenService.issue(user).accessToken();
+
+        String subject = Jwts.parser().verifyWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)))
+                .build().parseSignedClaims(accessToken).getPayload().getSubject();
+        assertThat(subject).isEqualTo("1");
+
+        TokenService.AccessClaims claims = tokenService.validateAccessToken(accessToken);
+        assertThat(claims.userId()).isEqualTo(1L);
+        assertThat(claims.username()).isEqualTo("bob");
+    }
+
+    // La razon de ser del cambio: cambiar el username no debe invalidar los
+    // tokens ya emitidos, porque no es la identidad que el token transporta.
+    @Test
+    void unTokenEmitidoSigueSiendoValidoDespuesDeQueElUsuarioCambieDeUsername() {
+        when(refreshTokenRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+        String accessToken = tokenService.issue(user).accessToken();
+
+        User renombrado = new User("bob-el-nuevo", "hash");
+        setId(renombrado, 1L);
+
+        TokenService.AccessClaims claims = tokenService.validateAccessToken(accessToken);
+        assertThat(claims.userId()).isEqualTo(renombrado.getId());
+    }
+
+    // Un token del formato anterior (subject = username) debe rechazarse como
+    // sesion invalida, no reventar con NumberFormatException -> 500.
+    @Test
+    void unTokenDelFormatoAnteriorConUsernameEnElSubjectSeRechazaComoSesionInvalida() {
+        String tokenViejo = Jwts.builder()
+                .subject("bob")
+                .expiration(Date.from(Instant.now().plusSeconds(ACCESS_TTL_SECONDS)))
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)), Jwts.SIG.HS256)
+                .compact();
+
+        assertThatThrownBy(() -> tokenService.validateAccessToken(tokenViejo))
+                .isInstanceOf(InvalidSessionException.class);
     }
 
     @Test

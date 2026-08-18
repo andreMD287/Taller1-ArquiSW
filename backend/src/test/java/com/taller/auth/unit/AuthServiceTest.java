@@ -140,7 +140,7 @@ class AuthServiceTest {
     @Test
     void validateDelegaEnTokenServiceSinTocarElRepositorioDeUsuarios() {
         when(tokenService.validateAccessToken("jwt"))
-                .thenReturn(new TokenService.AccessClaims("alice", Instant.now().plusSeconds(900)));
+                .thenReturn(new TokenService.AccessClaims(1L, "alice", Instant.now().plusSeconds(900)));
 
         authService.validate("jwt");
 
