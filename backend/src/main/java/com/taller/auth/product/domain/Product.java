@@ -82,6 +82,25 @@ public class Product {
         this.stock = stock;
     }
 
+    /**
+     * Copia sobre este producto los campos que el cliente puede modificar.
+     *
+     * id, active y createdAt NO se copian: el id es inmutable, active solo
+     * cambia por deactivate() y createdAt es auditoria que el cliente no
+     * gobierna. Sin esto, una actualizacion podria reescribir la fecha de
+     * creacion o resucitar un producto dado de baja.
+     *
+     * Vive en el dominio y no en el mapper a proposito: al agregar un atributo
+     * nuevo, el campo y la regla de que sea editable quedan en el MISMO
+     * archivo. Es una de las razones por las que el ejercicio cronometrado no
+     * se dispersa.
+     */
+    public void applyChangesFrom(Product changes) {
+        this.name = changes.getName();
+        this.price = changes.getPrice();
+        this.stock = changes.getStock();
+    }
+
     public boolean isActive() {
         return active;
     }

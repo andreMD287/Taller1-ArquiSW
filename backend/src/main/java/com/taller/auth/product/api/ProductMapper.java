@@ -14,6 +14,11 @@ import com.taller.auth.product.domain.Product;
  * nada. Convertirla en bean solo agregaria un salto de inyeccion sin ganar
  * nada testeable.
  *
+ * Solo traduce en los dos sentidos entre DTO y dominio. La actualizacion de
+ * una entidad existente NO se hace aqui sino en Product.applyChangesFrom():
+ * decidir que campos son editables es una regla del dominio, no del
+ * transporte, y asi el campo y su editabilidad quedan en el mismo archivo.
+ *
  * NOTA PARA EL EJERCICIO CRONOMETRADO: al agregar un atributo nuevo a
  * Product, este es uno de los archivos que hay que tocar (junto con los dos
  * records y la entidad). Esta contado en el guion.
@@ -25,18 +30,6 @@ public final class ProductMapper {
 
     public static Product toDomain(ProductRequest request) {
         return new Product(request.name(), request.price(), request.stock());
-    }
-
-    /**
-     * Actualizacion: se mutan solo los campos que el cliente puede cambiar.
-     * id, active y createdAt NO se tocan aqui — el id es inmutable, active se
-     * cambia por el endpoint de borrado logico y createdAt es un dato de
-     * auditoria que el cliente no gobierna.
-     */
-    public static void applyTo(Product product, ProductRequest request) {
-        product.setName(request.name());
-        product.setPrice(request.price());
-        product.setStock(request.stock());
     }
 
     public static ProductResponse toResponse(Product product) {

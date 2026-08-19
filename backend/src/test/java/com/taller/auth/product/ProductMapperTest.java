@@ -40,17 +40,17 @@ class ProductMapperTest {
     // El cliente no gobierna createdAt ni active: una actualizacion no puede
     // reescribir la fecha de creacion ni resucitar un producto dado de baja.
     @Test
-    void applyToNoTocaCreatedAtNiActive() {
-        Product product = new Product("Teclado", PRECIO, 10);
-        product.deactivate();
-        var createdAtOriginal = product.getCreatedAt();
+    void applyChangesFromNoTocaCreatedAtNiActive() {
+        Product existente = new Product("Teclado", PRECIO, 10);
+        existente.deactivate();
+        var createdAtOriginal = existente.getCreatedAt();
 
-        ProductMapper.applyTo(product, new ProductRequest("Teclado Pro", new BigDecimal("29.99"), 3));
+        existente.applyChangesFrom(new Product("Teclado Pro", new BigDecimal("29.99"), 3));
 
-        assertThat(product.getName()).isEqualTo("Teclado Pro");
-        assertThat(product.getPrice()).isEqualByComparingTo("29.99");
-        assertThat(product.getStock()).isEqualTo(3);
-        assertThat(product.getCreatedAt()).isEqualTo(createdAtOriginal);
-        assertThat(product.isActive()).isFalse();
+        assertThat(existente.getName()).isEqualTo("Teclado Pro");
+        assertThat(existente.getPrice()).isEqualByComparingTo("29.99");
+        assertThat(existente.getStock()).isEqualTo(3);
+        assertThat(existente.getCreatedAt()).isEqualTo(createdAtOriginal);
+        assertThat(existente.isActive()).isFalse();
     }
 }

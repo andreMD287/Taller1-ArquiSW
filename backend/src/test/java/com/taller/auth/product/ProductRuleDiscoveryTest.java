@@ -4,9 +4,12 @@ import com.taller.auth.product.application.rules.ProductRule;
 import com.taller.auth.product.application.rules.ProductRuleEngine;
 import com.taller.auth.product.application.rules.RuleViolation;
 import com.taller.auth.product.domain.Product;
+import com.taller.auth.product.infrastructure.ProductRepository;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -97,9 +100,21 @@ class ProductRuleDiscoveryTest {
                 });
     }
 
+    /**
+     * El contexto se limita al paquete de reglas: sin base de datos, sin web.
+     * ProductRepository se provee simulado porque ProductNameMustBeUniqueRule
+     * lo necesita — es el precio de que una regla pueda consultar
+     * persistencia, y por eso las reglas viven en application y no en domain
+     * (ADR-003).
+     */
     @Configuration
     @ComponentScan("com.taller.auth.product.application.rules")
     static class RulesScanConfig {
+
+        @Bean
+        ProductRepository productRepository() {
+            return Mockito.mock(ProductRepository.class);
+        }
     }
 
     @Component
