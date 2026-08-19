@@ -547,29 +547,94 @@ toca ni el módulo de usuarios ni el frontend— queda demostrada.
 
 ---
 
-## ADR-009 (ABIERTA) — Alcance de la unicidad de nombre frente al borrado lógico
+## ADR-009 — El nombre de un producto eliminado NO se reutiliza
 
-**Estado:** Pendiente de decisión de Rol 1.
+**Fecha:** 2026-08-18
+**Estado:** Aceptada
 
-Rol 2 confirmó que pondrá `UNIQUE` sobre `name` en la migración, y su
-`existsByName` no filtra por `active`. Ambas cosas son coherentes entre sí, pero
-juntas implican una consecuencia que todavía nadie decidió a propósito: **el
-nombre de un producto dado de baja queda bloqueado para siempre.** Lo mismo
-aplicará a `username` cuando `User` tenga `active`.
+### Decisión
 
-| Opción | Implicación en BD (Rol 2) | Implicación en la regla (Rol 1) |
-|---|---|---|
-| **Nombres quemados** — un nombre usado nunca se libera | `UNIQUE (name)` global, que es lo que Rol 2 ya planeó | La regla usa `existsByName` |
-| **Nombre reutilizable** — solo los activos compiten | `CREATE UNIQUE INDEX ... ON products(name) WHERE active` (índice parcial de Postgres) | La regla usa `existsByNameAndActiveTrue` |
+La unicidad de `name` es **global**, no restringida a los productos activos. Un
+nombre usado queda ocupado para siempre, aunque el producto se dé de baja.
 
-**Por qué hay que decidirlo antes de que Rol 2 escriba la migración:** si la regla
-del backend y la constraint de la base expresan alcances distintos, la validación
-diría que el nombre está libre y el `INSERT` reventaría igual con
-`DataIntegrityViolationException`. Las dos capas tienen que decir lo mismo, igual
-que con `stock >= 0`.
+- Base de datos: `CONSTRAINT uq_products_name UNIQUE (name)`, tal como ya quedó
+  en `V3__users_roles_products.sql`.
+- Regla de negocio: usa `existsByName` / `existsByNameAndIdNot`, las firmas que
+  Rol 2 ya entregó.
 
-Separación de responsabilidades: **la semántica es de Rol 1** (qué significa
-"único"), **el mecanismo es de Rol 2** (constraint global vs. índice parcial).
+### Alternativa descartada
+
+**Liberar el nombre al eliminar** — habría requerido un índice único parcial de
+Postgres (`CREATE UNIQUE INDEX ... ON products(name) WHERE active`) en una
+migración V4, más cambiar las firmas del repositorio a
+`existsByNameAndActiveTrue`. Es más natural para el usuario final, pero cuesta
+una migración adicional y una ronda más de coordinación, y el beneficio es
+marginal en el alcance del taller.
+
+### Razón
+
+Además del costo, mantener la unicidad global evita que dos productos distintos
+compartan el mismo nombre en momentos distintos del historial, lo que haría
+ambiguos los reportes y las referencias históricas — que es precisamente lo que
+el borrado lógico existe para preservar.
+
+### Consecuencia registrada
+
+Es una decisión **reversible y barata**: si más adelante resulta molesto, se
+resuelve con una V4 y un cambio de firma. Y si se implementa el SKU de ADR-008,
+la unicidad se movería a ese campo y el problema desaparece.
+
+### Coordinación
+
+**No se requiere V4.** El esquema publicado en V3 ya expresa esta decisión.
+
+---
+
+## ADR-010 — El primer ADMIN se crea por seed en migración Flyway
+
+**Fecha:** 2026-08-18
+**Estado:** Aceptada — **pendiente de implementación por Rol 2**
+
+### El problema que resuelve
+
+`V3` agrega `role VARCHAR(20) NOT NULL DEFAULT 'USER'` y el constructor de `User`
+asigna `Role.USER`. No existe ningún seed de administrador. Como la regla ya
+cerrada dice que **solo un `ADMIN` puede cambiar roles**, el sistema arrancaba
+con cero admins y **sin ninguna forma de salir de ese estado**. De paso, el
+interlock del último ADMIN estaba protegiendo un conjunto vacío:
+`countByRoleAndActiveTrue(ADMIN)` devolvía 0 siempre.
+
+Es un problema de arranque que no aparecía en ninguno de los dos checklists.
+
+### Decisión
+
+Una migración Flyway inserta el administrador inicial, con hash BCrypt fijo y
+contraseña que debe cambiarse en el primer uso.
+
+### Alternativas descartadas
+
+1. **Promover por SQL manual** (`UPDATE users SET role='ADMIN'` tras el primer
+   registro) — cero código, pero no es reproducible ni queda en el repositorio:
+   Rol 4 tendría que documentarlo como paso manual de despliegue, y un despliegue
+   limpio en Swarm quedaría sin administrador hasta que alguien se acordara.
+
+2. **Bootstrap por configuración al arrancar** — una propiedad
+   `app.bootstrap.admin-username` que promueva al usuario si no hay ningún ADMIN.
+   Descartada porque agrega lógica de arranque con estado y un camino de
+   escalada de privilegios gobernado por una variable de entorno.
+
+### Razón
+
+El seed en migración es determinista, versionado y reproducible: viaja con el
+código, se aplica igual en cualquier entorno y queda auditable en el historial de
+Flyway. Es la misma razón por la que el esquema entero es migración y no un paso
+manual (Cap. 5, *repeatability*).
+
+### Coordinación
+
+🔗 **Rol 2** implementa el seed en la próxima migración. Debe usar un hash BCrypt
+generado, nunca una contraseña en claro, y la credencial inicial debe
+documentarse para Rol 4 como paso obligatorio de puesta en marcha.
 
 ---
 
