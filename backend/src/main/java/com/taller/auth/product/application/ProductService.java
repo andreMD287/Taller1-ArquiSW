@@ -1,7 +1,10 @@
 package com.taller.auth.product.application;
 
 import com.taller.auth.dto.FieldViolation;
+import com.taller.auth.exception.AppException;
 import com.taller.auth.exception.BusinessRuleViolationException;
+import com.taller.auth.exception.DataUnavailableException;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import com.taller.auth.product.application.rules.ProductRuleEngine;
 import com.taller.auth.product.application.rules.RuleViolation;
 import com.taller.auth.product.domain.Product;
@@ -37,10 +40,16 @@ public class ProductService {
         this.ruleEngine = ruleEngine;
     }
 
+    @CircuitBreaker(name = "dataTier", fallbackMethod = "createFallback")
     @Transactional
     public Product create(Product product) {
         validate(product);
         return save(product);
+    }
+
+    @SuppressWarnings("unused")
+    private Product createFallback(Product product, Throwable t) {
+        return failOrDegrade(t);
     }
 
     /**
@@ -50,6 +59,7 @@ public class ProductService {
      * guardar un producto sin cambiarle el nombre no se reporte como nombre
      * duplicado consigo mismo.
      */
+    @CircuitBreaker(name = "dataTier", fallbackMethod = "updateFallback")
     @Transactional
     public Product update(Long id, Product changes) {
         Product existing = requireActive(id);
@@ -58,31 +68,70 @@ public class ProductService {
         return save(existing);
     }
 
+    @SuppressWarnings("unused")
+    private Product updateFallback(Long id, Product changes, Throwable t) {
+        return failOrDegrade(t);
+    }
+
     /**
      * Borrado logico. No hace falta llamar a save(): dentro de la transaccion,
      * JPA detecta el cambio de estado de la entidad gestionada y lo sincroniza
      * al hacer commit.
      */
+    @CircuitBreaker(name = "dataTier", fallbackMethod = "deactivateFallback")
     @Transactional
     public void deactivate(Long id) {
         requireActive(id).deactivate();
     }
 
+    @SuppressWarnings("unused")
+    private void deactivateFallback(Long id, Throwable t) {
+        failOrDegrade(t);
+    }
+
+    @CircuitBreaker(name = "dataTier", fallbackMethod = "findActiveByIdFallback")
     @Transactional(readOnly = true)
     public Product findActiveById(Long id) {
         return requireActive(id);
+    }
+
+    @SuppressWarnings("unused")
+    private Product findActiveByIdFallback(Long id, Throwable t) {
+        return failOrDegrade(t);
     }
 
     /**
      * Listado paginado, con busqueda opcional por nombre. Un nombre vacio o
      * ausente lista todo: es el caso normal del listado, no un error.
      */
+    @CircuitBreaker(name = "dataTier", fallbackMethod = "searchFallback")
     @Transactional(readOnly = true)
     public Page<Product> search(String name, Pageable pageable) {
         if (name == null || name.isBlank()) {
             return repository.findAllByActiveTrue(pageable);
         }
         return repository.findByNameContainingIgnoreCaseAndActiveTrue(name.trim(), pageable);
+    }
+
+    @SuppressWarnings("unused")
+    private Page<Product> searchFallback(String name, Pageable pageable, Throwable t) {
+        return failOrDegrade(t);
+    }
+
+    /**
+     * Resilience4j manda al fallback CUALQUIER excepcion, no solo las fallas
+     * reales de infraestructura. Un AppException -un producto no encontrado,
+     * una regla de negocio incumplida- es EXPECTED (Cap. 4) y debe propagarse
+     * tal cual: si se disfrazara de 503, un precio invalido contaria como
+     * caida del tier de datos en el modelo de disponibilidad.
+     *
+     * Mismo patron que AuthService.registerFallback y TokenService.issueFallback.
+     */
+    private static <T> T failOrDegrade(Throwable t) {
+        if (t instanceof AppException appException) {
+            throw appException;
+        }
+        throw new DataUnavailableException(t);
     }
 
     private Product requireActive(Long id) {

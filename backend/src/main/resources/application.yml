@@ -19,6 +19,15 @@ spring:
     hibernate:
       ddl-auto: validate
     open-in-view: false
+  data:
+    web:
+      pageable:
+        # tope duro al tamano de pagina: sin el, un cliente puede pedir
+        # ?size=100000 y hacer que una sola peticion incumpla el objetivo de
+        # rendimiento de <2s. El default de Spring (2000) es demasiado alto
+        # para las consultas de listado de este sistema.
+        default-page-size: 20
+        max-page-size: 100
   flyway:
     enabled: true
     locations: classpath:db/migration
