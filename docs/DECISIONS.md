@@ -638,6 +638,105 @@ documentarse para Rol 4 como paso obligatorio de puesta en marcha.
 
 ---
 
+## ADR-011 — Autorización de productos: leer autenticado, escribir ADMIN
+
+**Fecha:** 2026-08-18
+**Estado:** Aceptada — **implementada (inerte hasta que Rol 2 entregue)**
+
+### Decisión
+
+`GET /api/products` y `GET /api/products/{id}` requieren estar autenticado.
+`POST`, `PUT` y `DELETE` llevan `@PreAuthorize("hasRole('ADMIN')")`.
+
+El enunciado no especificaba nada sobre autorización de productos — solo decía
+que un `ADMIN` puede cambiar roles de otros usuarios.
+
+### Alternativas descartadas
+
+1. **Todo requiere ADMIN** — más restrictivo, pero un `USER` normal no podría ni
+   ver el catálogo, lo que deja a Rol 3 sin pantalla para usuarios no
+   administradores.
+2. **Lectura pública sin autenticación** — cómoda para demos y para el harness de
+   carga de Rol 4, pero expone el catálogo completo sin credenciales.
+
+### ⚠️ Riesgo abierto: las anotaciones están inertes
+
+Los `@PreAuthorize` **no se están aplicando todavía**. Faltan dos piezas de Rol 2:
+
+1. **`@EnableMethodSecurity` en `SecurityConfig`.** Sin ella, Spring **ignora las
+   anotaciones en silencio** — no fallan, simplemente no se aplican.
+2. **Un filtro que traduzca el JWT a un `Authentication` con authorities.** Sin
+   él, `.anyRequest().authenticated()` hace que los endpoints respondan 403 a
+   todos.
+
+**El orden importa y es peligroso:** hoy los endpoints están cerrados por
+completo. Si llega solo la pieza 2 sin la 1, quedarían **abiertos a cualquier
+usuario autenticado**, incluidos `POST`, `PUT` y `DELETE`. Las dos tienen que
+llegar juntas. Está advertido en la cabecera de `ProductController`.
+
+---
+
+## ADR-012 — `ProductService` detrás del circuit breaker `dataTier`
+
+**Fecha:** 2026-08-18
+**Estado:** Aceptada — **implementada**
+
+### Decisión
+
+Las cinco operaciones de `ProductService` llevan
+`@CircuitBreaker(name = "dataTier", fallbackMethod = ...)`, con el mismo patrón
+de fallback que `AuthService` y `TokenService`: si la causa es un `AppException`
+se relanza tal cual, y cualquier otra cosa se convierte en
+`DataUnavailableException`.
+
+### Alternativas descartadas
+
+1. **No ponerlo** — menos código, pero ante una caída de Postgres los endpoints
+   de producto darían 500 mientras el resto del sistema degrada a 503. Las
+   métricas por `FaultKind` que Rol 4 usa para calcular disponibilidad contarían
+   los dos casos de forma distinta sin ninguna razón de fondo.
+2. **Solo en las lecturas** — coherente con la nota de `application.yml` de que un
+   INSERT no idempotente no debe vivir detrás del *retry*, pero esa nota aplica a
+   `@Retry`, no a `@CircuitBreaker`. Abrir el circuito ante un tier de datos caído
+   es igual de correcto para escrituras.
+
+### Razón
+
+La uniformidad es el punto: el modelo de disponibilidad de Rol 4 asume que todo
+acceso al tier de datos pasa por el mismo circuit breaker. Un módulo que se salte
+esa convención no rompe nada visible en desarrollo, pero introduce un agujero en
+las mediciones.
+
+`ignore-exceptions: AppException` en `application.yml` es lo que impide que una
+violación de regla de negocio cuente como falla del tier de datos — misma
+mecánica que sostiene ADR-007.
+
+### Nota pendiente
+
+No se agregó `@Retry(name = "dataTier")` a las lecturas idempotentes
+(`search`, `findActiveById`), aunque la configuración existe y estaría
+justificada. Queda como mejora disponible si Rol 4 la considera necesaria para
+sus mediciones.
+
+---
+
+## Nota — tope de tamaño de página
+
+Se agregó a `application.yml`:
+
+```yaml
+spring.data.web.pageable.default-page-size: 20
+spring.data.web.pageable.max-page-size: 100
+```
+
+Sin ese tope, un cliente puede pedir `?size=100000` y hacer que **una sola
+petición incumpla el objetivo de rendimiento de <2s**. El valor por defecto de
+Spring (2000) es demasiado alto para las consultas de listado de este sistema.
+
+⚠️ Comunicado a Rol 4 por ser cambio en configuración compartida.
+
+---
+
 ## Nota sobre ADR-004 — costo asumido del `CHECK (price > 0)`
 
 Rol 2 confirmó que reforzará también `price > 0` como constraint en la migración,
