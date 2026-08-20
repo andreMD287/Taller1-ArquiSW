@@ -1,5 +1,5 @@
 # Documento de Arquitectura de Software
-## Sistema de autenticación de usuarios — Arquitectura 3-tier
+## Autenticación de usuarios y gestión de productos — Arquitectura 3-tier
 
 **Curso:** Arquitectura de Software
 **Marco de referencia:** Bass, Clements & Kazman, *Software Architecture in Practice*, 4.ª ed. — Capítulos 1, 2, 3, 4 y 5
@@ -923,20 +923,171 @@ momento).
 Si se contara como fallo, un usuario torpe bajaría la disponibilidad reportada y la
 métrica del 99.99 % no significaría nada.
 
+### 7.3 Vista de la gestión de excepciones
+
+Las tablas anteriores dicen *qué* errores existen. Esta vista muestra **dónde vive la
+gestión de excepciones dentro de la arquitectura** y qué recorrido hace una excepción desde
+que se lanza hasta que el cliente ve una respuesta.
+
+#### 7.3.1 Jerarquía: el tipo es el que transporta la decisión
+
+`AppException` es **abstracta**: no se instancia nunca, solo se hereda.
+
+```mermaid
+classDiagram
+    class AppException {
+        +String code
+        +FaultKind kind
+        +HttpStatus status
+        +boolean retryable
+    }
+    RuntimeException <|-- AppException
+    AppException <|-- InvalidCredentialsException
+    AppException <|-- AccountLockedException
+    AppException <|-- UserAlreadyExistsException
+    AppException <|-- InvalidSessionException
+    AppException <|-- DataUnavailableException
+    AppException <|-- BusinessRuleViolationException
+    AppException <|-- ProductNotFoundException
+```
+
+Cada subclase declara **de una vez** su código estable, su `FaultKind`, su status HTTP y si
+vale la pena reintentar. Eso significa que ningún `catch` disperso por el código tiene que
+decidir qué responder: la decisión viaja dentro del tipo de la excepción.
+
+#### 7.3.2 Recorrido de una excepción
+
+```mermaid
+flowchart TD
+    REQ["Petición HTTP"] --> FIL["RequestIdFilter<br/>genera requestId en el MDC"]
+    FIL --> CTRL["controller · product.api"]
+    CTRL --> SVC["service · product.application"]
+    SVC --> REPO["repository · product.infrastructure"]
+    REPO --> PG[("PostgreSQL")]
+
+    CTRL -. "MethodArgumentNotValidException<br/>(Bean Validation)" .-> GEH
+    SVC -. "InvalidCredentialsException<br/>AccountLockedException<br/>BusinessRuleViolationException<br/>ProductNotFoundException" .-> GEH
+    REPO -. "DataAccessException" .-> CB{"Circuit Breaker<br/>+ Retry<br/>Resilience4j"}
+    CB -. "DataUnavailableException<br/>(vía fallbackMethod)" .-> GEH
+    CB -. "AppException pasa de largo<br/>(ignore-exceptions)" .-> GEH
+
+    GEH["GlobalExceptionHandler<br/>@RestControllerAdvice<br/>ÚNICO punto de traducción"]
+    GEH --> MET["contador errors.&lt;kind&gt;<br/>Micrometer"]
+    GEH --> LOG["log estructurado<br/>con requestId"]
+    GEH --> RESP["ErrorResponse JSON<br/>code · kind · message<br/>retryable · requestId · violations"]
+```
+
+Tres propiedades que este diagrama hace visibles y que en una tabla no se ven:
+
+1. **Hay un solo punto de traducción.** Ningún controlador construye una `ErrorResponse` a
+   mano. Si mañana cambia el formato del cuerpo de error, cambia en un archivo.
+2. **El circuit breaker está en el camino, pero deja pasar los errores de negocio.**
+   `AppException` está en `ignore-exceptions` de Resilience4j, tanto del circuit breaker
+   como del retry. Sin eso, un usuario tecleando contraseñas equivocadas contaría como
+   fallas del tier de datos y podría **abrir el circuito para todos los demás**. Es la
+   frontera entre "el sistema funciona y dice que no" y "el sistema está roto".
+3. **Toda respuesta de error lleva el `requestId`** que generó `RequestIdFilter`, así que un
+   error reportado por un usuario se puede rastrear hasta su línea de log exacta.
+
+#### 7.3.3 Las tres tácticas de excepciones del Cap. 4, y dónde está cada una
+
+El catálogo del Capítulo 4 tiene **tres** tácticas distintas relacionadas con excepciones, y
+se confunden con facilidad porque comparten la palabra. Las tres están implementadas, en
+puntos distintos de la arquitectura:
+
+| Táctica | Qué hace | Dónde vive | Evidencia concreta |
+|---|---|---|---|
+| **Exception Prevention** (prevenir fallas, §8.4) | Impedir que la excepción llegue a existir | Borde de entrada y arranque | Bean Validation en los DTOs; tipos fuertes y `Optional` en vez de nulos; `TokenService.resolveSecret()` **se niega a arrancar** sin `JWT_SECRET` en el perfil `docker` |
+| **Exception Detection** (detectar fallas, §8.1) | Darse cuenta de que ocurrió algo no previsto | `GlobalExceptionHandler` | El handler de `Exception.class` es el único que registra el *stack trace* completo: cualquier cosa que llegue ahí es, por definición, una falta latente que se acaba de activar |
+| **Exception Handling** (recuperar de fallas, §8.2) | Que la excepción no tumbe el proceso y el cliente reciba algo útil | Banda transversal + fallbacks de Resilience4j | Ninguna excepción escapa como stack trace al cliente; los `fallbackMethod` degradan a `503 data_unavailable` en vez de propagar la falla; `logout` responde `202` en modo *best-effort* |
+
+**Por qué esto no es una sola táctica repetida:** la prevención actúa *antes* (el error no
+ocurre), la detección actúa *durante* (nos enteramos y lo clasificamos), y el manejo actúa
+*después* (contenemos el daño y respondemos). Un sistema puede tener una y no las otras: un
+`try/catch` genérico que se traga todo tiene manejo sin detección, y es exactamente el
+antipatrón que la separación de `FaultKind` evita aquí.
+
+#### 7.3.4 Dónde vive cada validación
+
+La gestión de excepciones no empieza cuando algo falla, sino en dónde se decide que algo es
+inválido. Hay tres capas, y cada regla vive en **una sola**:
+
+| Tipo | Dónde | Respuesta | Ejemplo |
+|---|---|---|---|
+| **Estructural** — falta el dato o no tiene la forma correcta | Bean Validation en el DTO (capa `api`) | `400 validation_error` | `@NotBlank`, `@NotNull`, `@Size` |
+| **Semántica de negocio** — el dato está bien formado pero la regla lo rechaza | Motor de reglas (capa `application`) | `422 business_rule_violation` con `violations[]` | precio > 0, stock ≥ 0, unicidad de nombre |
+| **Invariante inviolable** — no debe poder existir en la base | Constraint de BD | Traducida a `422` por el servicio | `UNIQUE(name)`, `CHECK (stock >= 0)` |
+
+Los dos códigos HTTP distintos no son un detalle de implementación: hacen **visible desde el
+cliente** la separación entre las dos primeras capas. Y la tercera se duplica a propósito
+con la segunda, porque cumplen papeles distintos — el backend produce el *mensaje* útil para
+el usuario, la constraint garantiza el *invariante* aunque una ruta de código futura se
+salte el motor de reglas. Es la diferencia entre "validar" y "no poder violar".
+
 ---
 
 ## 8. Tácticas de disponibilidad aplicadas (Cap. 4)
+
+### 8.0 Vista de tácticas sobre la arquitectura
+
+Las tablas de §8.1 a §8.4 listan las tácticas por categoría del libro. Esta vista las
+coloca **en el punto de la arquitectura donde actúan**, que es la pregunta que una tabla no
+responde: no *cuáles* tácticas hay, sino *dónde* está cada una.
+
+```mermaid
+flowchart TD
+    NAV["Navegador"]
+
+    subgraph P["TIER DE PRESENTACIÓN — servicio web ×2"]
+        WEB["nginx + MVC<br/>· Redundant Spare (2 réplicas)<br/>· Ping/Echo (HEALTHCHECK /healthz)<br/>· Removal from Service (routing mesh)"]
+    end
+
+    subgraph L["TIER DE LÓGICA — servicio backend ×3"]
+        API["controller · product.api<br/>· Exception Prevention (Bean Validation)"]
+        BIZ["service · product.application<br/>· Increase Competence Set (LockoutPolicy)<br/>· Transactions (noRollbackFor)<br/>· Interlock (último ADMIN, PESSIMISTIC_WRITE)"]
+        HLT["actuator<br/>· Ping/Echo (liveness)<br/>· Condition Monitoring (readiness)<br/>· Monitor (Micrometer)"]
+        EXC["exception<br/>· Exception Detection<br/>· Exception Handling"]
+    end
+
+    subgraph D["TIER DE DATOS — acceso a datos"]
+        RES["repository<br/>· Circuit Breaker (dataTier)<br/>· Retry (solo idempotentes)<br/>· Timestamp (exp del JWT)"]
+    end
+
+    PG[("PostgreSQL ×3<br/>· Redundant Spare (repmgr)<br/>· Leader Election<br/>· State Resync (pg_basebackup)<br/>· Sanity Checking (SELECT 1)")]
+
+    NAV --> WEB
+    WEB -->|proxy /api| API
+    API --> BIZ
+    BIZ --> RES
+    RES -->|JDBC| PG
+    API -.-> EXC
+    BIZ -.-> EXC
+    RES -.-> EXC
+```
+
+**Cómo leer este diagrama.** Cada táctica aparece una sola vez, en la caja donde está
+implementada. Tres lecturas que salen de aquí y que las tablas no dejan ver:
+
+- **La redundancia ya no tiene huecos.** Los tres tiers y la base de datos tienen
+  Redundant Spare. En v1.0, el tier de presentación no existía y Postgres era instancia
+  única.
+- **El circuit breaker está en el tier de datos, no en el de lógica.** Protege exactamente
+  la frontera remota que puede fallar, y por eso `/api/auth/validate` —que no llega hasta
+  esa caja— no puede responder `503` por causa de la base de datos.
+- **La banda de excepciones cruza los tres tiers** (las flechas punteadas). Es la única
+  preocupación transversal del diseño, y por eso se dibuja como destino de todos y no como
+  un paso más del recorrido.
 
 ### 8.1 Detectar fallas
 
 | Táctica | Implementación | Escenario que atiende |
 |---|---|---|
-| **Ping/Echo** | `GET /actuator/health/liveness`, consultado por el `HEALTHCHECK` de Docker en cada tarea de Swarm | ESC-D1, ESC-D6 |
+| **Ping/Echo** | `GET /actuator/health/liveness` en el tier de lógica y `GET /healthz` en el de presentación, consultados por el `HEALTHCHECK` de Docker en cada tarea de Swarm. La sonda del tier web **no** consulta al backend a propósito: si lo hiciera, una caída del tier de lógica sacaría de rotación a los servidores web y el usuario no vería ni la página de error (mismo criterio que ADR-03) | ESC-D1, ESC-D6 |
 | **Sanity Checking / Self-Test** | `DataTierHealthIndicator`: `SELECT 1` con timeout corto | ESC-D2, ESC-D7 |
 | **Condition Monitoring** | `readiness` evalúa el estado de las dependencias antes de aceptar tráfico; `repmgrd` monitorea la salud del primario en cada standby | ESC-D6, ESC-D7 |
 | **Monitor** | Actuator + Micrometer: contador `errors.<kind>`, etiquetado por `code`; estado del circuito expuesto en `/api/diagnostics` | Todos |
 | **Heartbeat** | Tarea `@Scheduled` que emite un latido con el `NODE_ID` (ahora derivado del hostname templado por Swarm, no fijado a mano) | ESC-D1 |
-| **Exception Detection** | `GlobalExceptionHandler` con handler de `Exception.class` | ESC-D4 |
+| **Exception Detection** | `GlobalExceptionHandler`, handler de `Exception.class`: es el **único** que registra el stack trace completo, porque cualquier excepción que llegue ahí es por definición una falta latente recién activada. Clasifica cada error con un `FaultKind` y lo cuenta en `errors.<kind>` (ver §7.3.2) | ESC-D4 |
 | **Timestamp** | `createdAt` / `expiresAt` en el refresh token y en el JWT (claim `exp`), para detectar estado obsoleto | ESC-D2 |
 
 **Diferencia que conviene tener clara en la sustentación:** *Ping/Echo* lo inicia el
@@ -948,9 +1099,9 @@ segundo no requiere que el monitor conozca a todos los nodos.
 
 | Táctica | Implementación | Escenario |
 |---|---|---|
-| **Redundant Spare (active / hot spare)** | 3 réplicas activas del backend tras el *routing mesh* de Swarm (antes 2, tras nginx); 3 nodos de Postgres con `repmgr` (nuevo, Fase 4) | ESC-D1, ESC-D7 |
+| **Redundant Spare (active / hot spare)** | 2 réplicas del servicio `web` (nuevo: el tier de presentación no existía); 3 réplicas activas del backend tras el *routing mesh* de Swarm (antes 2, tras nginx); 3 nodos de Postgres con `repmgr` (Fase 4). **Ya no queda ningún tier sin redundancia** | ESC-D1, ESC-D7 |
 | **Retry** | Resilience4j con backoff exponencial y *jitter*, solo sobre operaciones idempotentes (ADR-05) — ahora solo relevante para el 5 % del tráfico | ESC-D3 |
-| **Exception Handling** | La banda transversal: ninguna excepción termina el proceso | ESC-D4 |
+| **Exception Handling** | Ninguna excepción termina el proceso ni escapa como stack trace al cliente: `@RestControllerAdvice` traduce cada una a un `ErrorResponse` con código estable, y los `fallbackMethod` de Resilience4j degradan a `503 data_unavailable` en vez de propagar la falla. `logout` es *best-effort*: responde `202` si no pudo revocar. **Recorrido completo en §7.3.2** | ESC-D4 |
 | **Rollback** | `scripts/rollback.sh` → `docker service rollback`, declarativo (ver ESC-P2) | ESC-P2 |
 
 **Lo que ya no aparece aquí, y por qué es la noticia principal de esta sección:**
