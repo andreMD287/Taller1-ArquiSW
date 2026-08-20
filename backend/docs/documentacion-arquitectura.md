@@ -186,12 +186,18 @@ siendo una especificación sin evidencia directa.
 | **Medida de respuesta** | **0 peticiones fallidas** observadas por el cliente; reprogramación en **28 s medidos** (E2, sección 12); sin intervención humana |
 | **Verificado** | Sí — E2, dos corridas independientes, 28 s ambas veces |
 
-#### ESC-D2 — Caída del tier de datos
+#### ESC-D2 — Caída de la base de datos
+
+> **Nota de terminología (ver ADR-02).** El *tier de datos* es el módulo de acceso a datos
+> y corre dentro del mismo proceso que el tier de lógica: no puede caerse por separado. Lo
+> que se cae en este escenario es **PostgreSQL**, el recurso externo que ese tier
+> encapsula. En el código, el identificador `dataTier` (el circuit breaker de Resilience4j
+> y `DataTierHealthIndicator`) nombra la *dependencia hacia PostgreSQL*, no el tier.
 
 | Parte | Valor |
 |---|---|
 | **Fuente** | Externo al software: los procesos de PostgreSQL |
-| **Estímulo** | El tier de datos completo deja de responder |
+| **Estímulo** | La base de datos completa deja de responder |
 | **Artefacto** | Los 3 nodos de Postgres |
 | **Entorno** | Operación normal |
 | **Respuesta** | `/api/auth/validate` **no se entera**: se verifica en memoria (ADR-08), cero dependencia del tier de datos. `/login` y `/refresh` — las únicas operaciones que tocan la BD — responden `503 data_unavailable` mientras la BD esté abajo; ningún nodo sano se reinicia (`liveness` nunca consulta Postgres, ADR-03) |
@@ -203,11 +209,11 @@ local con `degraded: true` (ADR-04, ahora superado) para servir `validate` duran
 caída. Ahora **no hace falta ninguna táctica de degradación**, porque `validate` nunca
 tuvo una dependencia que degradar (ver ADR-08).
 
-#### ESC-D3 — Latencia anómala en el tier de datos
+#### ESC-D3 — Latencia anómala de la base de datos
 
 | Parte | Valor |
 |---|---|
-| **Fuente** | Interno: el tier de datos |
+| **Fuente** | Externo al software: PostgreSQL |
 | **Estímulo** | Una consulta tarda más de lo especificado |
 | **Artefacto** | Pool de conexiones del backend hacia el cluster Postgres |
 | **Entorno** | Operación normal, en `/login` o `/refresh` (los únicos que tocan la BD) |
@@ -314,21 +320,23 @@ Responde: *¿cómo está organizado el código y quién puede cambiar qué?*
 
 ```mermaid
 graph TD
-    subgraph tier2["Tier de lógica — com.taller.auth"]
-        C[controller<br/>borde HTTP]
-        S[service<br/>reglas de negocio + TokenService]
-        R[repository<br/>UserRepository, RefreshTokenRepository]
-        M[model<br/>User, RefreshTokenEntity]
-        D[dto<br/>contratos]
-        E[exception<br/>banda transversal]
-        CF[config<br/>seguridad, resiliencia, salud]
-        SE[security<br/>correlation id]
+    subgraph tierL["TIER DE LÓGICA — reglas de negocio"]
+        C["controller · product.api<br/>borde HTTP, DTOs"]
+        S["service · product.application<br/>reglas de negocio, motor de reglas"]
+        E["exception<br/>banda transversal"]
+        CF["config · security<br/>infraestructura transversal"]
     end
+    subgraph tierD["TIER DE DATOS — acceso a datos"]
+        R["repository · product.infrastructure<br/>UserRepository, RefreshTokenRepository,<br/>ProductRepository"]
+        M["model · product.domain<br/>User, RefreshTokenEntity, Product"]
+        TX["transacciones<br/>@Transactional, PESSIMISTIC_WRITE"]
+    end
+    DB[("PostgreSQL<br/>recurso externo, NO es un tier")]
     C --> S
-    C --> D
     S --> R
-    S --> M
     R --> M
+    R --> TX
+    R -->|JDBC| DB
     C -.-> E
     S -.-> E
     R -.-> E
@@ -338,6 +346,35 @@ graph TD
 Nunca al revés. El servicio no conoce HTTP; el repositorio no conoce reglas de negocio.
 Esta es la aplicación directa de la regla estructural del Capítulo 1: *módulos con
 ocultamiento de información e interfaces separadas de las implementaciones*.
+
+**Dónde está la frontera entre el tier de lógica y el tier de datos:** en la interfaz de
+repositorio. Todo lo que está por encima trabaja con objetos de dominio y no sabe que
+existe un motor relacional; todo lo que está por debajo conoce JPA. Ninguna clase de
+`service` importa `jakarta.persistence`, y ninguna clase de `repository` contiene una
+regla de negocio. Esa es la comprobación mecánica de que la frontera es real y no
+decorativa.
+
+#### Mapeo entre tiers y paquetes
+
+El sistema tiene **dos estructuras simultáneas** que no son isomorfas, y el Capítulo 1 es
+explícito en que eso es normal: la organización del código (vista de módulos) y la
+separación de responsabilidades (vista de tiers) responden preguntas distintas.
+
+El código usa dos convenciones de empaquetado por razones documentadas en `docs/DECISIONS.md`
+(ADR-001 de Taller 2): el código original está organizado por capa técnica, y el módulo de
+productos por *vertical slice*. **Ambas convenciones se reparten entre los mismos dos
+tiers:**
+
+| Tier | Paquetes por capa técnica (auth) | Paquetes por vertical slice (productos) |
+|---|---|---|
+| **Lógica** | `controller`, `service`, `dto`, `exception`, `config`, `security` | `product.api`, `product.application` |
+| **Datos** | `repository`, `model` | `product.infrastructure`, `product.domain` |
+
+Que el tier de datos no sea **una sola carpeta** no significa que no exista como tier: su
+frontera es la interfaz de repositorio, y esa frontera es la misma en las dos convenciones.
+La alternativa —consolidar físicamente todo el acceso a datos en un paquete común— se
+evaluó y se descartó: rompería la cohesión del módulo de productos y degradaría el escenario
+de modificabilidad de Taller 2, que depende de que todo lo de un producto cambie junto.
 
 El paquete `model`/`repository` se redujo respecto a v1.0: `SessionEntity`/
 `SessionRepository` (la sesión persistida completa) desaparecieron; solo queda
@@ -474,27 +511,64 @@ solo aplican al 5 % del tráfico.
 
 **Estado:** aceptada
 **Contexto:** el enunciado exige 3 tiers con canal remoto.
-**Decisión:** presentación (cliente web), lógica (Spring Boot) y datos (PostgreSQL +
-capa repositorio) se despliegan como procesos y contenedores independientes.
+**Decisión:** presentación (servidor web + aplicación MVC), lógica (servicios y reglas de
+negocio) y datos (módulo de acceso a datos: repositorios, entidades y transacciones) son
+los tres tiers. **PostgreSQL no es un tier: es el recurso externo que el tier de datos
+encapsula**, y vive detrás de él (ver ADR-02).
 **Consecuencias positivas:** cada tier escala y se despliega por separado; una caída del
 tier de datos no arrastra al de lógica; se puede hacer rolling upgrade de un tier sin
 tocar los otros.
 **Consecuencias negativas:** latencia de red en cada salto; hay que manejar fallas
 parciales que en un monolito no existirían; más piezas que operar.
 
-### ADR-02 — El tier de datos es PostgreSQL, no un servicio HTTP propio
+### ADR-02 — El tier de datos es el módulo de acceso a datos; la base de datos va aparte
 
-**Estado:** aceptada
-**Contexto:** el diagrama del taller muestra tres cajas de aplicación. Una lectura
-estricta pediría un tercer Spring Boot que exponga `/data/users`.
-**Decisión:** el tier de datos es el motor de base de datos más la capa `repository` que
-lo encapsula. La frontera remota es JDBC.
-**Justificación:** un tercer servicio HTTP agregaría un despliegue, otro circuit breaker,
-otra fuente de latencia y ~30 % más de código, sin cambiar ninguna conclusión del análisis
-de disponibilidad. El presupuesto de tiempo del taller (RE-6) no lo permite.
-**Mitigación:** gracias al patrón Repositorio, sustituir PostgreSQL por un servicio HTTP
-**no requeriría cambiar ninguna clase de la capa de negocio**. La decisión es reversible;
-esa reversibilidad es, en sí misma, el argumento de ocultamiento de información del Cap. 1.
+**Estado:** aceptada — **revisada** (esta ADR reemplaza la formulación anterior, que
+fusionaba el tier de datos con el motor de base de datos)
+
+**Contexto:** la arquitectura de referencia del curso define tres tiers —presentación,
+lógica y datos— **conectados a una base de datos**. La base de datos es, por lo tanto, una
+pieza distinta de los tres tiers, no uno de ellos. La formulación anterior de esta ADR
+decía que "el tier de datos es el motor de base de datos más la capa repositorio", lo que
+mezclaba dos cosas que la arquitectura de referencia separa a propósito.
+
+**Decisión:** el **tier de datos** es el módulo de acceso a datos: repositorios, entidades
+de persistencia y gestión de transacciones. Es el único que conoce JPA y el único que sabe
+que existe un motor relacional. **PostgreSQL es un recurso externo** al que ese tier se
+conecta por JDBC, no un tier del sistema.
+
+Consecuencias concretas de la corrección:
+
+| Elemento | Antes (formulación anterior) | Ahora |
+|---|---|---|
+| Repositorios y entidades | Dibujados dentro del tier de lógica (§5.1) | Son **el tier de datos** |
+| PostgreSQL | Considerado "el tier de datos" | Recurso externo detrás del tier de datos |
+| Frontera remota | tier de lógica ↔ Postgres | tier de datos ↔ Postgres (JDBC) |
+
+**Sobre el tier de datos como proceso desplegado:** el tier de datos es un módulo con
+frontera propia dentro del mismo proceso que el tier de lógica, no un servicio HTTP
+independiente. Un tercer servicio agregaría un despliegue, otro circuit breaker y otra
+fuente de latencia; además lo pondría **en serie** en la cadena de disponibilidad,
+obligando a replicarlo y a rehacer el modelo cuantitativo de la §11. Gracias al patrón
+Repositorio, esa promoción a servicio propio **no requeriría cambiar ninguna clase de la
+capa de negocio**: la decisión es reversible, y esa reversibilidad es en sí misma el
+argumento de ocultamiento de información del Cap. 1.
+
+**Nota sobre estructuras (Cap. 1):** que el tier de datos no sea una única carpeta no
+significa que no exista como tier. El Capítulo 1 es explícito en que un sistema tiene
+**varias estructuras simultáneas** y que cada una responde preguntas distintas: la vista de
+módulos describe cómo está empaquetado el código, y la vista de tiers describe la
+separación de responsabilidades en tiempo de ejecución. No tienen por qué ser isomorfas.
+El mapeo exacto entre ambas está en la §5.1.
+
+**Sobre JTA:** la gestión de transacciones de este tier usa `@Transactional` de Spring
+sobre `JpaTransactionManager`. **No se usa JTA**, y es una decisión, no un olvido: JTA
+existe para coordinar transacciones distribuidas (XA) sobre **varios** recursos
+transaccionales. Aquí hay un solo `DataSource`, así que JTA agregaría un coordinador de
+transacciones y su sobrecarga de protocolo de dos fases sin ninguna transacción distribuida
+que coordinar. Si en el futuro se incorpora un segundo recurso transaccional —una cola de
+mensajes, una segunda base de datos—, la migración a JTA sería necesaria y el punto de
+cambio sería la configuración del `PlatformTransactionManager`, no las clases anotadas.
 
 ### ADR-03 — `liveness` no consulta la base de datos
 
@@ -872,9 +946,9 @@ en una sonda concurrente de 133 muestras.
 
 | Patrón | Dónde | Qué aporta |
 |---|---|---|
-| **Three-tier / N-tier** | Estructura global | Separación de responsabilidades con fronteras de despliegue |
+| **Three-tier / N-tier** | Estructura global | Presentación, lógica y datos como responsabilidades separadas; PostgreSQL es el recurso externo detrás del tier de datos, no un tier (ADR-02) |
 | **Layers** | Interior del tier de lógica | Dependencias en un solo sentido: controller → service → repository |
-| **Repository** | `repository/` | Oculta la decisión de motor de persistencia (habilita ADR-02) |
+| **Repository** | `repository`, `product.infrastructure` | **Es la frontera del tier de datos**: por encima se trabaja con objetos de dominio, por debajo se conoce JPA. Oculta la decisión de motor de persistencia (ADR-02) |
 | **Service Mesh liviano (routing mesh de Swarm)** | Infraestructura de Swarm | Reemplaza a Load-Balanced Cluster + nginx: redundancia activa sin un balanceador desplegado como componente propio (ADR-10) |
 | **Circuit Breaker** | Acceso al tier de datos (`/login`, `/refresh`) | Evita el fallo en cascada y el agotamiento del pool, ahora acotado al 5 % del tráfico |
 | **Leader Election** | Cluster de Postgres con `repmgr` | Base de ESC-D7: exactamente un primario en todo momento, con promoción automática (Fase 4) |
@@ -1165,7 +1239,7 @@ deuda deliberada y registrada es gestionable; la no documentada es la peligrosa.
 | DA-3 | Caché de sesiones local por réplica | **Eliminada** (ADR-08 supera a ADR-04) | — | — |
 | DA-4 | Sin versionado de la API | Vigente | Alcance del taller | Bajo si se hace ahora, alto después |
 | DA-5 | Escalating Restart manual | **Reducida** (ADR-09, ADR-11): automática para caída de proceso, manual solo para pérdida de disco | Sin StatefulSets en Swarm | Ver DA-7 |
-| DA-6 | Tier de datos no es servicio propio | Vigente (ADR-02) | Alcance del taller | Medio, acotado por Repository |
+| DA-6 | El tier de datos es un módulo en proceso, no un servicio desplegado aparte | Vigente (ADR-02) | Ponerlo en serie obligaría a replicarlo y a rehacer el modelo de la §11 | Bajo: la frontera es la interfaz de repositorio, así que promoverlo a servicio no toca la capa de negocio |
 | DA-7 | **Nueva.** Volúmenes de Postgres locales al nodo Swarm: la muerte de un nodo no-manager pierde su disco | Documentada, no resuelta | RE-6, alcance de MVP; Swarm no tiene volúmenes distribuidos nativos | Alto: requiere NFS/EBS/CSI o migrar a Kubernetes con StorageClass |
 | DA-8 | **Nueva.** Split-brain posible si se reincorpora un nodo de Postgres sin seguir el procedimiento de vaciado de volumen | Mitigada en script, no en infraestructura | Bitnami reutiliza el `PGDATA` existente sin verificar el estado del cluster | Medio: un *sidecar* o *init container* que verifique el rol antes de arrancar |
 
