@@ -55,3 +55,29 @@ button {
     margin-top: 20px;
     text-align: center;
 }
+/* Estados que pinta la vista. Las clases son el unico contrato visual entre
+   LoginView y esta hoja: la vista decide cual aplicar, el CSS como se ve. */
+
+#message.info {
+    color: #555;
+}
+
+#message.success {
+    color: #1b7f3a;
+}
+
+#message.error {
+    color: #b3261e;
+}
+
+/* Resalta el input que el backend rechazo, a partir del campo `field` de
+   cada violacion del contrato de error. */
+input.field-error {
+    border: 2px solid #b3261e;
+    outline: none;
+}
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}

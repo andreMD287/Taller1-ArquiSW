@@ -18,9 +18,12 @@
         <form id="loginForm">
 
             <label for="username">Usuario</label>
+            <!-- el atributo name no es decorativo: es como la vista localiza
+                 el input al que apunta cada violacion del backend -->
             <input
                 type="text"
                 id="username"
+                name="username"
                 placeholder="Nombre de usuario"
                 required
             >
@@ -29,6 +32,7 @@
             <input
                 type="password"
                 id="password"
+                name="password"
                 placeholder="Contraseña"
                 required
             >
@@ -43,7 +47,10 @@
 
     </main>
 
-    <script src="app.js"></script>
+    <!-- type="module" habilita import/export nativos del navegador: la
+         separacion modelo/vista/controlador vive en archivos separados sin
+         necesidad de un empaquetador ni de un paso de build -->
+    <script type="module" src="src/app.js"></script>
 
 </body>
 </html>
