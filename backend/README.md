@@ -12,18 +12,37 @@ endpoint con `curl`, y reproducir los experimentos), ver
 ## Arquitectura en 3 tiers
 
 ```
-┌───────────────┐   HTTP/JSON    ┌───────────────────────────────┐   JDBC/TCP    ┌──────────────┐
-│  Tier 1        │ ┄┄┄┄┄┄┄┄┄┄┄▶ │  Tier 2 — nginx + 2 réplicas   │ ┄┄┄┄┄┄┄┄┄┄┄▶ │  Tier 3       │
-│  Presentación  │ ◀┄┄┄┄┄┄┄┄┄┄┄ │  backend-1 / backend-2         │ ◀┄┄┄┄┄┄┄┄┄┄┄ │  PostgreSQL   │
-│  (cliente web) │  FRONTERA 1   │  (Spring Boot, este repo)      │  FRONTERA 2   │  + repository │
-└───────────────┘   REMOTA      └───────────────────────────────┘   REMOTA      └──────────────┘
+   ┌────────────────────────┐        ┌────────────────────────┐        ┌────────────────────────┐
+   │  TIER 1 — Presentación │  HTTP  │  TIER 2 — Lógica       │        │  TIER 3 — Datos        │
+   │  servicio  web  (×2)   │ ┄┄┄┄▶ │  servicio backend (×3) │ ┄┄┄┄▶ │  acceso a datos        │
+   │  nginx + MVC del       │ ◀┄┄┄┄ │  Spring Boot           │ ◀┄┄┄┄ │  repositorios,         │
+   │  frontend              │        │  servicios y reglas    │        │  entidades, @Transact. │
+   └────────────────────────┘ FRONT. └────────────────────────┘        └───────────┬────────────┘
+                               REMOTA 1                                            │ JDBC
+                                                                       FRONTERA    │ REMOTA 2
+                                                                                   ▼
+                                                                        ┌────────────────────────┐
+                                                                        │  PostgreSQL (×3)       │
+                                                                        │  recurso externo,      │
+                                                                        │  NO es un tier         │
+                                                                        └────────────────────────┘
 ```
 
-Las dos líneas punteadas (`┄┄┄`) son las **fronteras remotas**: procesos
-independientes que se comunican por red y que, por lo tanto, pueden fallar de
-formas que un monolito nunca tiene que enfrentar (timeout, conexión rechazada,
-nodo caído). Todo el trabajo de disponibilidad (Cap. 4) existe por esas dos
-líneas.
+Tres precisiones que este diagrama hace explícitas:
+
+1. **El tier de presentación es un servicio desplegado**, no el navegador del
+   usuario. Sirve el MVC del frontend y hace de proxy inverso de `/api`, de modo
+   que el navegador ve un solo origen y no hay CORS.
+2. **El tier de datos es el módulo de acceso a datos** —repositorios, entidades
+   y transacciones—, no el motor de base de datos. PostgreSQL es el recurso
+   externo que ese tier encapsula (ADR-02).
+3. **Las líneas punteadas son las fronteras remotas**: procesos independientes
+   que se comunican por red y que pueden fallar de formas que un monolito nunca
+   enfrenta (timeout, conexión rechazada, nodo caído). Todo el trabajo de
+   disponibilidad del Cap. 4 existe por esas líneas.
+
+El detalle completo, con las vistas de módulos, C&C y despliegue, está en
+[`docs/documentacion-arquitectura.md`](docs/documentacion-arquitectura.md).
 
 ## Arranque
 
@@ -37,9 +56,16 @@ Un solo comando, tanto para evaluar en un portátil de un solo nodo como para
 la demo de alta disponibilidad en varios: inicializa el swarm si hace falta,
 genera los secrets (`jwt_secret`, `postgres_password`,
 `postgres_superuser_password`, `repmgr_password`) si no existen, construye
-la imagen y despliega `stack.yml`. La API queda expuesta en
-`http://localhost:8080`, balanceada por el *routing mesh* de Swarm entre las 3
-réplicas del backend — **mismo archivo de despliegue** en 1 nodo o en N (ver
+las imágenes y despliega `stack.yml`. Quedan expuestos dos puertos:
+
+- **`http://localhost`** — la aplicación web (tier de presentación). Es la
+  entrada normal para un usuario.
+- **`http://localhost:8080`** — la API del tier de lógica, directa. Se publica
+  para que las sondas y los scripts de caos midan el backend sin pasar por
+  presentación.
+
+Ambos balanceados por el *routing mesh* de Swarm entre las réplicas sanas de
+cada servicio — **mismo archivo de despliegue** en 1 nodo o en N (ver
 `stack.yml` para el detalle de por qué Swarm y no Kubernetes ni el
 docker-compose de desarrollo).
 
@@ -60,9 +86,15 @@ docker compose up --build
 ```
 
 Levanta `postgres`, `backend-1`, `backend-2` (misma imagen, distinto
-`NODE_ID`) y `nginx` como balanceador delante de las dos réplicas, en
-`http://localhost:8080`. Pensado para iterar en el backend sin depender de
-Swarm; **no** es el despliegue que se evalúa (ver arriba).
+`NODE_ID`) y un `nginx` que balancea entre las dos réplicas, en
+`http://localhost:8080`.
+
+> **Es el camino heredado de v1.0 y no refleja la arquitectura actual.** No
+> incluye el tier de presentación, y su `nginx` (`backend/nginx.conf`) cumple
+> el papel de *balanceador* que en Swarm hace el routing mesh — no confundir
+> con el `nginx` del servicio `web` (`frontend/nginx.conf`), que es el
+> *servidor web* del tier de presentación. Sirve solo para iterar rápido en el
+> backend; **no** es el despliegue que se evalúa.
 
 Para correr solo el backend en desarrollo, sin Docker, contra H2:
 

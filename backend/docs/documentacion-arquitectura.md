@@ -320,6 +320,11 @@ Responde: *¿cómo está organizado el código y quién puede cambiar qué?*
 
 ```mermaid
 graph TD
+    subgraph tierP["TIER DE PRESENTACIÓN — MVC del navegador"]
+        V["view/<br/>LoginView — solo DOM"]
+        CT["controller/<br/>LoginController — coordina"]
+        MO["model/<br/>AuthModel, ApiClient — estado y datos"]
+    end
     subgraph tierL["TIER DE LÓGICA — reglas de negocio"]
         C["controller · product.api<br/>borde HTTP, DTOs"]
         S["service · product.application<br/>reglas de negocio, motor de reglas"]
@@ -332,6 +337,9 @@ graph TD
         TX["transacciones<br/>@Transactional, PESSIMISTIC_WRITE"]
     end
     DB[("PostgreSQL<br/>recurso externo, NO es un tier")]
+    V --> CT
+    CT --> MO
+    MO -->|HTTP /api| C
     C --> S
     S --> R
     R --> M
@@ -396,10 +404,14 @@ Responde: *¿qué se está ejecutando y cómo se habla entre sí?*
 
 ```mermaid
 graph LR
-    NAV[Navegador] -->|HTTP/JSON<br/>routing mesh :8080| SWARM{{Swarm ingress}}
-    SWARM --> B1[backend #1<br/>Spring Boot]
-    SWARM --> B2[backend #2<br/>Spring Boot]
-    SWARM --> B3[backend #3<br/>Spring Boot]
+    NAV[Navegador] -->|HTTP :80| ING1{{Swarm ingress}}
+    ING1 --> W1["web #1<br/>nginx + MVC"]
+    ING1 --> W2["web #2<br/>nginx + MVC"]
+    W1 -->|proxy /api<br/>mismo origen| ING2{{Swarm ingress}}
+    W2 --> ING2
+    ING2 --> B1[backend #1<br/>Spring Boot]
+    ING2 --> B2[backend #2<br/>Spring Boot]
+    ING2 --> B3[backend #3<br/>Spring Boot]
     B1 -->|JDBC multi-host<br/>targetServerType=primary| PG1[(postgres-1)]
     B2 --> PG1
     B3 --> PG1
@@ -410,9 +422,27 @@ graph LR
     B3 -.->|stdout JSON| LOG
 ```
 
-**Cambio central respecto a v1.0:** nginx desapareció del diagrama por completo (ADR-10);
-el *routing mesh* de Swarm es infraestructura del propio orquestador, no un componente
-desplegado que pueda quedar como SPOF. Y las flechas backend→Postgres ya **no** son
+**Dónde está nginx y qué papel cumple.** Es una distinción que conviene tener clara porque
+en v1.0 los dos papeles estaban fundidos en un solo contenedor:
+
+| Papel | Quién lo cumple hoy | Antes (v1.0) |
+|---|---|---|
+| **Balancear** entre réplicas sanas | *Routing mesh* de Swarm (infraestructura del orquestador) | nginx de instancia única — el SPOF que eliminó ADR-10 |
+| **Servir la aplicación web** | Servicio `web`: nginx replicado (×2) con los estáticos del MVC | Nadie. El frontend no lo servía ningún proceso |
+
+Es decir: nginx **no volvió como balanceador** —eso sigue resuelto por el routing mesh, y
+ADR-10 sigue vigente— sino que **apareció donde nunca había estado**, como servidor web del
+tier de presentación. Al ir replicado detrás del routing mesh, no reintroduce el SPOF que
+ADR-10 identificó: el argumento de aquella decisión era contra la *instancia única*, no
+contra nginx.
+
+**El proxy `/api` no es comodidad, es arquitectura.** Al pasar por el mismo origen, el
+frontend no lleva ninguna URL de backend escrita en el código y el navegador no ejecuta
+CORS. Antes, `app.js` apuntaba a `http://localhost:8080` fijo —lo que hacía que la
+aplicación solo funcionara en la máquina del desarrollador— y el backend tenía que aceptar
+cualquier origen.
+
+**Las flechas backend→Postgres** ya **no** son
 uniformes: solo `/login` y `/refresh` las usan; `/validate` (el 95 % del tráfico) no tiene
 ninguna flecha hacia el tier de datos — se resuelve enteramente dentro del propio backend.
 Esa asimetría, invisible en el diagrama de v1.0 porque no existía, es el punto central de
@@ -432,6 +462,7 @@ Responde: *¿dónde vive cada cosa y qué se cae junto?*
 graph TB
     subgraph swarm["Swarm — 1 a N nodos, mismo stack.yml"]
         subgraph net["Red overlay auth-net"]
+            WS["Servicio web<br/>deploy.replicas: 2<br/>routing mesh :80"]
             BS["Servicio backend<br/>deploy.replicas: 3<br/>routing mesh :8080"]
             PS1["Servicio postgres-1<br/>bitnamilegacy/postgresql-repmgr"]
             PS2["Servicio postgres-2<br/>standby"]
@@ -446,8 +477,9 @@ graph TB
 ```
 
 **Unidades de falla:** cada tarea de Swarm es una unidad de falla independiente, y ahora
-**todas** son redundantes — las 3 réplicas de `backend` (Redundant Spare, ya lo eran en
-v1.0) y los 3 nodos de `postgres` (nuevo: Fase 4). El único SPOF de infraestructura que
+**todas** son redundantes — las 2 réplicas de `web` (nuevas: el tier de presentación nunca
+había estado desplegado), las 3 réplicas de `backend` (Redundant Spare, ya lo eran en
+v1.0) y los 3 nodos de `postgres` (Fase 4). El único SPOF de infraestructura que
 queda, y que se documenta a propósito en vez de esconderse, es el **almacenamiento local
 por nodo**: los volúmenes de Postgres son locales a la máquina Swarm donde corre cada
 tarea (sección 14, DA-7).
@@ -774,6 +806,60 @@ no a los ~29 s medidos aquí. Resolverlo de verdad exige almacenamiento distribu
 reproducible, con el backend sirviendo `/login` correctamente contra el nuevo primario
 sin reiniciarse (E9, sección 12).
 
+### ADR-12 — Tier de presentación: servicio web replicado con MVC en el cliente
+
+**Estado:** aceptada
+
+**Contexto:** hasta esta versión, **el tier de presentación no existía como componente
+desplegado**. El diagrama lo mostraba como "cliente web (navegador)", pero el navegador es
+quien consume el sistema, no una parte de él. En la práctica: los archivos de `frontend/`
+no los servía ningún proceso, `stack.yml` no los mencionaba, la guía de uso no explicaba
+cómo abrirlos, y había que cargarlos desde el sistema de archivos. Como consecuencia
+directa, `CorsConfig` tenía que aceptar cualquier origen (`"*"`) y el JavaScript llevaba
+`http://localhost:8080` escrito en el código, lo que hacía que la aplicación solo
+funcionara en la máquina del desarrollador.
+
+Conviene señalar que **quitar nginx (ADR-10) no causó este hueco**: aquel nginx era
+exclusivamente proxy y balanceador —su configuración no servía un solo archivo estático—,
+así que nunca cumplió el papel de servidor web.
+
+**Decisión:** un servicio `web` replicado (×2) que cumple dos funciones:
+
+1. **Servidor web**: sirve el HTML, el CSS y los módulos del MVC.
+2. **Proxy inverso**: enruta `/api` hacia el tier de lógica.
+
+Y una aplicación **MVC** en el cliente, con las tres responsabilidades en carpetas
+separadas:
+
+| Carpeta | Responsabilidad | Regla verificable |
+|---|---|---|
+| `src/model/` | Estado de la aplicación y acceso a datos (`AuthModel`, `ApiClient`) | No menciona `document` ni `window.document` |
+| `src/view/` | Todo el acceso al DOM, y nada más (`LoginView`) | No menciona `fetch` ni `ApiClient` |
+| `src/controller/` | Coordina modelo y vista; traduce errores a mensajes (`LoginController`) | No toca el DOM ni llama a la API |
+
+`src/app.js` es el único archivo que conoce las tres capas: construye las piezas y las
+conecta, igual que la inyección de dependencias hace en el backend.
+
+**Por qué módulos ES nativos y no un framework:** la separación MVC queda **visible en el
+árbol de archivos** en vez de implícita en un modelo de componentes, no hay paso de build ni
+`node_modules`, y la imagen del tier de presentación es nginx más archivos estáticos.
+
+**Por qué el proxy importa arquitectónicamente:** al ver un solo origen, el frontend no
+lleva ninguna URL de backend en el código y desaparece el CORS. Esto habilita cerrar
+`CorsConfig` a un origen concreto (pendiente, ver §14).
+
+**Sobre ADR-10:** este servicio **no la contradice**. ADR-10 eliminó un balanceador de
+*instancia única*, que era un SPOF delante de componentes redundantes. Aquí nginx cumple un
+papel distinto y va replicado detrás del routing mesh, que sigue siendo quien balancea. El
+argumento de ADR-10 era contra la instancia única, no contra nginx.
+
+**Consecuencia para disponibilidad:** el tier de presentación entra **en serie** en la
+cadena vista desde el navegador, así que su disponibilidad multiplica. Por eso se despliega
+replicado desde el principio: con 2 réplicas y reprogramación automática de Swarm, su
+aporte a la indisponibilidad es del mismo orden que el del tier de lógica y no domina el
+resultado de la §11. Las mediciones existentes siguen siendo válidas para la API, que se
+sigue publicando directamente en el puerto 8080 para las sondas.
+
 ---
 
 ## 7. Taxonomía de fallas: falta, error y fallo
@@ -947,6 +1033,8 @@ en una sonda concurrente de 133 muestras.
 | Patrón | Dónde | Qué aporta |
 |---|---|---|
 | **Three-tier / N-tier** | Estructura global | Presentación, lógica y datos como responsabilidades separadas; PostgreSQL es el recurso externo detrás del tier de datos, no un tier (ADR-02) |
+| **MVC** | Tier de presentación (`frontend/src/`) | Modelo, vista y controlador en carpetas separadas, con la regla verificable de que la vista no llama a la API y el modelo no toca el DOM (ADR-12) |
+| **Reverse Proxy** | Servicio `web` → `/api` | Un solo origen para el navegador: elimina el CORS y saca la URL del backend del código del cliente (ADR-12) |
 | **Layers** | Interior del tier de lógica | Dependencias en un solo sentido: controller → service → repository |
 | **Repository** | `repository`, `product.infrastructure` | **Es la frontera del tier de datos**: por encima se trabaja con objetos de dominio, por debajo se conoce JPA. Oculta la decisión de motor de persistencia (ADR-02) |
 | **Service Mesh liviano (routing mesh de Swarm)** | Infraestructura de Swarm | Reemplaza a Load-Balanced Cluster + nginx: redundancia activa sin un balanceador desplegado como componente propio (ADR-10) |

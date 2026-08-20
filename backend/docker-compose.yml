@@ -1,3 +1,10 @@
+# CAMINO HEREDADO DE v1.0 — solo desarrollo local del backend.
+#
+# El despliegue real es stack.yml (Docker Swarm). Este archivo NO incluye el
+# tier de presentacion y su nginx cumple el papel de balanceador, que en Swarm
+# hace el routing mesh (ADR-10). Se conserva porque levantar el cluster
+# completo para iterar en el backend es innecesariamente lento.
+
 services:
   postgres:
     image: postgres:16-alpine

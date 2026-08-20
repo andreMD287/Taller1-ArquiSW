@@ -68,9 +68,10 @@ Si solo quieres iterar en el backend sin el cluster de Postgres:
 docker compose up --build
 ```
 
-Levanta una versión más simple (2 réplicas de backend, nginx, un solo Postgres). **No** es
-el despliegue que demuestra la disponibilidad de la sección 11 del documento de
-arquitectura — para eso usa `deploy.sh`.
+Levanta una versión más simple (2 réplicas de backend, un nginx que balancea entre ellas,
+un solo Postgres). **No** incluye el tier de presentación y **no** es el despliegue que
+demuestra la disponibilidad de la sección 11 del documento de arquitectura — para eso usa
+`deploy.sh`, que además publica la aplicación web en `http://localhost`.
 
 Para correr solo el backend, sin Docker en absoluto, contra una base en memoria:
 
