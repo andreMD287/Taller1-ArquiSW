@@ -34,7 +34,7 @@
 10. [Patrones arquitectónicos](#10-patrones-arquitectónicos)
 11. [Análisis cuantitativo de disponibilidad](#11-análisis-cuantitativo-de-disponibilidad)
 12. [Plan de medición y experimentos](#12-plan-de-medición-y-experimentos)
-13. [Cuestionario basado en tácticas](#13-cuestionario-basado-en-tácticas)
+13. [Cuestionario y priorización de tácticas](#13-cuestionario-y-priorización-de-tácticas)
 14. [Deuda arquitectónica, riesgos y trabajo futuro](#14-deuda-arquitectónica-riesgos-y-trabajo-futuro)
 15. [Trazabilidad](#15-trazabilidad)
 
@@ -159,9 +159,15 @@ la Fase 4 (HA de Postgres) se implementó como MVP con limitaciones documentadas
 |---|---|---|
 | 1 | **Disponibilidad** | Objeto del Cap. 4 y objetivo explícito del enunciado |
 | 2 | **Desplegabilidad** | Objeto del Cap. 5; además condiciona la disponibilidad, porque los despliegues son una causa mayor de caídas |
-| 3 | Modificabilidad | Habilita las dos anteriores: sin separación de responsabilidades no hay despliegue granular |
+| 3 | **Modificabilidad** | Objeto del Cap. 8 y **atributo central del Taller 2**. Habilita además las dos anteriores: sin separación de responsabilidades no hay despliegue granular |
 | 4 | Seguridad | Requisito del dominio (contraseñas, tokens), tratado como higiene, no como objeto de estudio |
-| 5 | Desempeño | Se mide (p95) pero no se optimiza |
+| 5 | Desempeño | Se mide (p95); en Taller 2 pasa a tener objetivo explícito (<2 s) |
+
+**Ampliación del Taller 2.** El alcance original priorizaba dos atributos; el Taller 2 suma
+cuatro con tratamiento propio: **modificabilidad** (priorización de tácticas en §13.3,
+decisiones en [`docs/DECISIONS.md`](../../docs/DECISIONS.md)), **safety**, **rendimiento**
+(<2 s) y **eficiencia energética**. La modificabilidad ascendió de "habilitador" a objeto
+de estudio; los otros tres se documentan en sus entregables respectivos.
 
 ---
 
@@ -1402,56 +1408,125 @@ para que una sonda por sí sola tuviera significancia estadística sobre un pres
 
 ---
 
-## 13. Cuestionario basado en tácticas
+## 13. Cuestionario y priorización de tácticas
 
-Formato del Capítulo 3: para cada táctica, si está soportada, el riesgo de su ausencia o
-implementación parcial, la decisión de diseño y su ubicación.
+Formato del Capítulo 3: para cada táctica, si está soportada, la decisión de diseño y su
+ubicación. Se agrega la **priorización**, porque el catálogo del libro es deliberadamente
+exhaustivo y aplicarlo entero no es una meta: el Cap. 4 lista 25 tácticas de
+disponibilidad, el Cap. 5 nueve de desplegabilidad y el Cap. 8 ocho de modificabilidad.
+Adoptarlas todas multiplicaría piezas que operar sin mover las medidas de respuesta, y
+varias son directamente inaplicables a este dominio.
 
-### 13.1 Disponibilidad
+**La pregunta que responde esta sección no es "¿cuáles existen?" sino "¿cuáles elegimos y
+por qué esas".**
 
-| Táctica | ¿Soportada? | Riesgo | Decisión y ubicación | Justificación |
-|---|---|---|---|---|
-| Ping/Echo | Sí | L | `HEALTHCHECK` de Docker sobre `liveness`, consumido por el *routing mesh* de Swarm | Detección sin depender de un balanceador externo |
-| Monitor | Sí | L | Micrometer + `/actuator/metrics` | Base de toda medición |
-| Heartbeat | Sí | L | `@Scheduled` con `NODE_ID` (hostname templado por Swarm) | Complementa Ping/Echo |
-| Timestamp | Sí | L | `exp` del JWT; `expiresAt` del refresh token | Detecta estado obsoleto |
-| Condition Monitoring | Sí | L | `DataTierHealthIndicator`; `repmgrd` sobre el primario | Alimenta readiness y ESC-D7 |
-| Sanity Checking | Sí | L | `SELECT 1` con timeout | Self-test del tier |
-| Voting | **No** | L | — | Requiere réplicas que calculen lo mismo; no aplica a este dominio |
-| Exception Detection | Sí | L | `GlobalExceptionHandler` | Ninguna excepción pasa inadvertida |
-| Self-Test | Sí | L | `SELECT 1` en cada consulta a `readiness` | `DataTierHealthIndicator` |
-| Redundant Spare | Sí | L | 3 réplicas de backend + 3 nodos de Postgres (Fase 4) | ESC-D1, ESC-D7 |
-| Rollback | Sí | L | `docker service rollback`, declarativo | ESC-P2 |
-| Exception Handling | Sí | L | Banda transversal | 0 stack traces expuestos |
-| Retry | Sí | M | Resilience4j, solo idempotentes, acotado al 5 % del tráfico | Riesgo si se extendiera a escrituras |
-| Ignore Faulty Behavior | **No** | L | — | No hay fuentes externas no confiables |
-| Graceful Degradation | **No — eliminada a propósito** | — | `validate` no tiene dependencia del tier de datos que degradar (ADR-08, supera a ADR-04) | La ausencia de esta táctica es la mejora, no una carencia |
-| Reconfiguration | **Sí** *(era "No" en v1.0)* | L | Swarm reprograma tareas de `backend` caídas; `repmgrd` promueve standbys de Postgres | ESC-D1, ESC-D7 |
-| Shadow | **No** | L | — | Fuera del alcance |
-| State Resync | Sí *(era "Parcial" en v1.0)* | L | Re-clonado (`pg_basebackup`) del nodo reincorporado tras vaciar su volumen | Ya no depende de una caché ad-hoc; es el mecanismo nativo de repmgr |
-| Escalating Restart | Parcial | M | Automatizado para caída de contenedor/proceso; la muerte de disco de un nodo no-manager sigue siendo manual (DA-7) | Documentado como límite explícito del MVP |
-| Nonstop Forwarding | **No** | L | — | Propio de elementos de red |
-| Removal from Service | Sí | L | `readiness` + *routing mesh* de Swarm | ADR-03 |
-| Transactions | Sí | L | `@Transactional(noRollbackFor = AppException.class)` en `login()` (ADR-07) | Integridad ante fallas parciales |
-| Predictive Model | **No** | **H** | — | Sin predicción de degradación: las fallas solo se detectan cuando ya ocurrieron |
-| Exception Prevention | Sí | L | Bean Validation, tipos fuertes; arranque bloqueado sin `JWT_SECRET` en `docker` (nuevo) | Reduce faltas latentes |
-| Increase Competence Set | Sí | L | Bloqueo por intentos (`LockoutPolicy` + ADR-07) | Estados adversos previstos |
+### 13.0 Criterio de priorización
 
-### 13.2 Desplegabilidad
+Cada táctica se califica en tres ejes, con escala **A**lto / **M**edio / **B**ajo:
 
-| Táctica | ¿Soportada? | Riesgo | Decisión y ubicación |
-|---|---|---|---|
-| Scale Rollouts | Sí | L | `update_config` de Swarm, declarativo (antes: orquestado a mano por un script) |
-| Rollback | Sí | L | `docker service rollback` |
-| Script Deployment Commands | Sí | L | Todo el despliegue está guionado (`deploy.sh`) |
-| Manage Service Interactions | Parcial | M | Graceful shutdown; sin versionado de API |
-| Package Dependencies | Sí | L | Imagen multietapa |
-| Feature Toggle | Sí | L | Variables de entorno |
-| Canary Testing | **No** | M | Requiere enrutamiento por porcentaje |
-| A/B Testing | **No** | L | Fuera del alcance |
-| Blue-Green | Parcial | L | Se optó por rolling declarativo; blue-green necesitaría duplicar el stack |
+| Eje | Qué mide |
+|---|---|
+| **Impacto** | Cuánto mueve la *medida de respuesta* del escenario que la táctica atiende. Una táctica que no cambia ningún número medido tiene impacto B por elegante que sea |
+| **Costo** | Esfuerzo de implementación **más** la complejidad permanente que agrega: piezas nuevas que operar, dependencias, código que mantener |
+| **Riesgo si se omite** | Qué tan expuesto queda el sistema sin ella |
 
-### 13.3 Riesgos altos detectados
+De ahí sale la prioridad:
+
+| Prioridad | Significado |
+|---|---|
+| **P1 — adoptada** | Impacto alto con costo asumible. Sostiene directamente un escenario con medida verificada |
+| **P2 — adoptada con límite** | Se implementa con alcance acotado a propósito, y el límite queda documentado en vez de escondido |
+| **P3 — descartada conscientemente** | Impacto bajo sobre *los escenarios de este sistema*, o costo desproporcionado frente a lo que aporta. Descartar no es olvidar: cada P3 lleva su razón |
+
+Una aclaración que evita malinterpretar la tabla: **P3 no significa "táctica mala"**.
+*Voting* es excelente en sistemas de control redundante y aquí no aplica porque no hay
+réplicas que calculen lo mismo. La prioridad es relativa a este sistema y a sus escenarios,
+no una calificación del catálogo.
+
+### 13.1 Disponibilidad (Cap. 4)
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| Ping/Echo | Sí | A | B | A | **P1** | `HEALTHCHECK` de Docker sobre `liveness` y `/healthz`, consumido por el *routing mesh* |
+| Monitor | Sí | A | B | A | **P1** | Micrometer + `/actuator/metrics`; contador `errors.<kind>` — base de toda medición |
+| Condition Monitoring | Sí | A | B | A | **P1** | `DataTierHealthIndicator`; `repmgrd` sobre el primario. Alimenta `readiness` y ESC-D7 |
+| Exception Detection | Sí | A | B | A | **P1** | `GlobalExceptionHandler` (§7.3). Ninguna excepción pasa inadvertida |
+| Exception Handling | Sí | A | B | A | **P1** | Banda transversal + `fallbackMethod`. 0 stack traces expuestos |
+| Exception Prevention | Sí | A | B | M | **P1** | Bean Validation, tipos fuertes; arranque bloqueado sin `JWT_SECRET` en `docker` |
+| Redundant Spare | Sí | A | M | A | **P1** | 2 réplicas de `web`, 3 de `backend`, 3 nodos de Postgres. Ningún tier sin redundancia |
+| Reconfiguration | Sí *(era "No" en v1.0)* | A | B | A | **P1** | Swarm reprograma tareas caídas; `repmgrd` promueve standbys. El costo es B porque lo aporta el orquestador |
+| Removal from Service | Sí | A | B | A | **P1** | `readiness` + *routing mesh* (ADR-03) |
+| Rollback | Sí | A | B | A | **P1** | `docker service rollback`, declarativo (ESC-P2) |
+| State Resync | Sí *(era "Parcial")* | A | M | A | **P1** | Re-clonado (`pg_basebackup`) tras vaciar el volumen. Mecanismo nativo de repmgr |
+| Transactions | Sí | A | B | A | **P1** | `@Transactional(noRollbackFor = AppException.class)` en `login()` (ADR-07) |
+| Timestamp | Sí | M | B | M | **P1** | `exp` del JWT; `expiresAt` del refresh token. Es lo que hace viable la sesión sin estado |
+| Sanity Checking | Sí | M | B | M | **P1** | `SELECT 1` con timeout corto |
+| Increase Competence Set | Sí | M | B | M | **P1** | `LockoutPolicy` + ADR-07: estados adversos previstos, no excepcionales |
+| Retry | Sí | M | B | M | **P2** | Resilience4j, **solo idempotentes**, acotado al 5 % del tráfico. Extenderlo a escrituras introduciría duplicados: el límite es la decisión |
+| Self-Test | Sí | M | B | M | **P2** | `SELECT 1` en `readiness`. Se solapa parcialmente con Sanity Checking; no se construyó un self-test más amplio |
+| Heartbeat | Sí | B | B | B | **P2** | `@Scheduled` con `NODE_ID`. Complementa a Ping/Echo, que ya cubre el caso principal |
+| Escalating Restart | Parcial | M | A | M | **P2** | Automatizado para caída de contenedor; la muerte del disco de un nodo no-manager sigue manual (DA-7). Resolverlo exige almacenamiento distribuido |
+| Predictive Model | **No** | M | A | **A** | **P3** | Exige series temporales y umbrales calibrados con histórico que no existe. **Es el riesgo R-1**, asumido a conciencia |
+| Voting | **No** | B | A | B | **P3** | Requiere réplicas que calculen lo mismo y comparen resultados. No aplica: las réplicas atienden peticiones distintas |
+| Ignore Faulty Behavior | **No** | B | B | B | **P3** | No hay fuentes externas no confiables que ignorar |
+| Shadow | **No** | B | A | B | **P3** | Exige duplicar tráfico a un entorno paralelo. Fuera del alcance |
+| Nonstop Forwarding | **No** | B | A | B | **P3** | Propia de elementos de red con plano de control y de datos separados |
+| Graceful Degradation | **No — eliminada a propósito** | — | — | — | **P3** | `validate` ya no tiene dependencia del tier de datos que degradar (ADR-08 supera a ADR-04). **La ausencia es la mejora, no una carencia**: no se contiene el daño de una falla, se elimina la falla |
+
+**Lectura de la tabla.** Las 15 P1 son las que sostienen los escenarios con medida
+verificada. Las cuatro P2 comparten un patrón: están implementadas *con un límite explícito*
+—Retry solo en idempotentes, Escalating Restart solo hasta la caída de contenedor— y ese
+límite es la decisión, no un descuido. Las seis P3 se reparten en dos grupos: cinco
+inaplicables al dominio y **una sola descartada por costo teniendo riesgo alto**
+(Predictive Model), que por eso mismo aparece como R-1 en §13.4.
+
+### 13.2 Desplegabilidad (Cap. 5)
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| Scale Rollouts | Sí | A | B | A | **P1** | `update_config` de Swarm, declarativo (antes: orquestado a mano por un script) |
+| Rollback | Sí | A | B | A | **P1** | `docker service rollback` |
+| Script Deployment Commands | Sí | A | B | A | **P1** | Todo el despliegue guionado (`deploy.sh`), incluidas las dos imágenes |
+| Package Dependencies | Sí | A | B | M | **P1** | Imagen multietapa; el tier de presentación no necesita build |
+| Feature Toggle | Sí | M | B | B | **P1** | Variables de entorno y `@ConditionalOnProperty` sobre `features.*` |
+| Manage Service Interactions | Parcial | M | M | M | **P2** | *Graceful shutdown* sí; **sin versionado de API**. Con un solo cliente el riesgo es acotado; dejaría de serlo con clientes externos |
+| Canary Testing | **No** | M | A | M | **P3** | Exige enrutamiento por porcentaje, que el *routing mesh* no ofrece. Requeriría un proxy con reglas de tráfico — la pieza que ADR-10 eliminó |
+| Blue-Green | Parcial | B | A | B | **P3** | Se optó por rolling declarativo; blue-green exigiría duplicar el stack entero, incluido el cluster de Postgres |
+| A/B Testing | **No** | B | A | B | **P3** | Mide comportamiento de usuarios, no despliegue. Fuera del alcance |
+
+### 13.3 Modificabilidad (Cap. 8)
+
+Este atributo es el objeto del Taller 2. El escenario que sostienen estas tácticas es:
+*agregar un atributo nuevo y su regla de validación a `Producto`*, con medida de respuesta
+de ≤2 módulos tocados, <3 horas y 0 defectos nuevos. Las decisiones detalladas, con sus
+alternativas descartadas, están en [`docs/DECISIONS.md`](../../docs/DECISIONS.md).
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| **Defer binding** | Sí | A | B | A | **P1** | **El núcleo del diseño.** Las reglas se enlazan al motor por inyección de dependencias al arrancar el contenedor, no al compilar (ADR-003); los toggles se resuelven leyendo configuración (ADR-005). Es lo que permite agregar una regla sin editar ningún archivo existente |
+| Increase semantic coherence | Sí | A | B | A | **P1** | *Vertical slice*: todo lo que cambia por la misma razón queda junto (ADR-001). Una regla = una clase (ADR-003). Cada tipo de validación en su capa (ADR-004) |
+| Encapsulate | Sí | A | B | A | **P1** | `product.api` es la única superficie pública del módulo; `ProductRuleEngine` la única del motor; `ProductMapper` impide que la entidad se exponga por HTTP (ADR-006) |
+| Restrict dependencies | Sí | A | B | A | **P1** | Dirección de dependencias hacia lo compartido, nunca hacia el módulo de features: `FieldViolation` vive en `dto` y no en `product` (ADR-007). El token dejó de depender del username mutable (ADR-002) |
+| Split module | Sí | A | B | M | **P1** | El módulo `product` es autocontenido y no lo toca el de usuarios (ADR-001); el motor de reglas está partido en una clase por regla |
+| Use an intermediary | Sí, **acotada** | M | M | M | **P2** | `ProductMapper` entre DTO y dominio, y `GlobalExceptionHandler` como único traductor excepción→HTTP. **Se rechazaron dos intermediarios más**: MapStruct (ADR-006) y convertir el mapper en bean, porque agregaban un salto sin ganar nada testeable |
+| Abstract common services | Parcial | M | M | B | **P2** | La interfaz `ProductRule` y el patrón Repositorio abstraen sus servicios. No se construyó una capa de abstracción más amplia: con dos entidades no habría a qué abstraer todavía |
+| Refactor | Puntual | M | M | B | **P2** | Aplicada donde hizo falta —mover `applyChangesFrom` del mapper al dominio, para que el campo nuevo y su editabilidad queden en el mismo archivo—, no como práctica planificada |
+
+**Lo descartado, y por qué.** Aquí el criterio de costo pesó más que en los otros atributos,
+porque casi toda táctica de modificabilidad se paga con una indirección permanente:
+
+| Descartado | Táctica que habría aportado | Razón |
+|---|---|---|
+| **MapStruct** | Use an intermediary | Ahorra un archivo en el ejercicio cronometrado (impacto B) a cambio de un *annotation processor* en el build y un mapeo que deja de verse en el repositorio (costo A) |
+| **Togglz / FF4J** | Defer binding en ejecución | Toggles en caliente (impacto B para este alcance) a cambio de dependencia, tabla nueva y una consola que asegurar (costo A) |
+| **Registro central de reglas** (enum o `Map`) | Encapsulate | **Impacto negativo**: agregar una regla obligaría a editar el registro, que es exactamente lo que la medida de respuesta penaliza |
+| **Consolidar el acceso a datos en un paquete único** | Increase semantic coherence | **Impacto negativo sobre el escenario**: sacar `ProductRepository` del *slice* haría que agregar un atributo tocara un módulo más |
+
+Los dos últimos son el caso interesante: son tácticas del catálogo que, aplicadas a este
+sistema, **empeorarían** la medida de respuesta. Es la mejor evidencia de que la
+priorización no puede hacerse leyendo el catálogo, sino contra el escenario concreto.
+
+### 13.4 Riesgos altos detectados
 
 **R-1 (Alto) — Ausencia de Predictive Model.** Sin cambios respecto a v1.0: el sistema
 solo reacciona a fallas consumadas, no hay detección de tendencias.
