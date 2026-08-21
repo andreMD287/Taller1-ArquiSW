@@ -1,5 +1,12 @@
 package com.taller.auth.service;
 
+import java.time.Instant;
+
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
 import com.taller.auth.dto.LogoutResponse;
 import com.taller.auth.dto.TokenResponse;
 import com.taller.auth.dto.ValidateResponse;
@@ -10,13 +17,8 @@ import com.taller.auth.exception.InvalidCredentialsException;
 import com.taller.auth.exception.UserAlreadyExistsException;
 import com.taller.auth.model.User;
 import com.taller.auth.repository.UserRepository;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
-import org.springframework.dao.DataIntegrityViolationException;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Instant;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 
 /**
  * Reglas de negocio de autenticacion. No conoce HTTP: los controladores
@@ -79,7 +81,7 @@ public class AuthService {
     @CircuitBreaker(name = "dataTier", fallbackMethod = "loginFallback")
     @Transactional(noRollbackFor = AppException.class)
     public TokenResponse login(String username, String rawPassword) {
-        User user = userRepository.findByUsername(username).orElse(null);
+        User user = userRepository.findByUsernameAndActiveTrue(username).orElse(null);
         Instant now = Instant.now();
 
         if (user == null) {

@@ -1,24 +1,5 @@
 package com.taller.auth.service;
 
-import com.taller.auth.exception.AppException;
-import com.taller.auth.exception.DataUnavailableException;
-import com.taller.auth.exception.InvalidSessionException;
-import com.taller.auth.model.RefreshTokenEntity;
-import com.taller.auth.model.User;
-import com.taller.auth.repository.RefreshTokenRepository;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
-import io.jsonwebtoken.JwtException;
-import io.jsonwebtoken.Claims;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.env.Environment;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
-import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
@@ -27,24 +8,35 @@ import java.util.Date;
 import java.util.HexFormat;
 import java.util.UUID;
 
+import javax.crypto.SecretKey;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.taller.auth.exception.AppException;
+import com.taller.auth.exception.DataUnavailableException;
+import com.taller.auth.exception.InvalidSessionException;
+import com.taller.auth.model.RefreshTokenEntity;
+import com.taller.auth.model.Role;
+import com.taller.auth.model.User;
+import com.taller.auth.repository.RefreshTokenRepository;
+import com.taller.auth.repository.UserRepository;
+
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.JwtException;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.security.Keys;
+
 /**
  * Emision, validacion y revocacion de sesiones.
  *
- * DECISION CENTRAL DE LA FASE 1: el token de acceso es un JWT firmado
- * (HMAC-SHA256) y se valida ENTERAMENTE EN MEMORIA (verificacion de firma +
- * expiracion), sin tocar el tier de datos. Antes, "validate" -que es ~95%
- * del trafico- consultaba Postgres en cada llamada, metiendo a la BD en el
- * camino critico de casi toda peticion y acotando la disponibilidad del
- * sistema a la de la BD. Con esto, el 95% del trafico queda con
- * disponibilidad = disponibilidad del tier de logica, sin mas.
- *
- * TRADE-OFF ACEPTADO: un JWT no se puede revocar antes de que expire sin
- * volver a introducir estado compartido (una lista de revocacion en Redis
- * reintroduce el mismo problema con otro nombre). Se acepta una ventana de
- * revocacion de hasta accessTtlSeconds (15 min por defecto) a cambio de
- * sacar la BD del camino critico. El refresh token si se persiste y si es
- * revocable: es de vida larga (7 dias) y de bajo volumen (5% del trafico,
- * solo en /login y /refresh), asi que puede pagar el costo de una consulta.
+ * El access token es un JWT firmado que se valida completamente en memoria.
+ * El refresh token si se persiste porque debe ser revocable.
  */
 @Service
 public class TokenService {
@@ -52,163 +44,259 @@ public class TokenService {
     private static final Logger log = LoggerFactory.getLogger(TokenService.class);
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final String ISSUER = "auth-service";
-    // Unicamente para perfiles que no son "docker": permite `./mvnw spring-boot:run`
-    // o pruebas locales sin exigirle a cada desarrollador que exporte JWT_SECRET.
-    // 64 caracteres ASCII = 64 bytes, muy por encima del minimo de 32 bytes de HS256.
+
     private static final String DEV_INSECURE_SECRET =
             "dev-only-insecure-secret-DO-NOT-USE-IN-PRODUCTION-please-32bytes+";
 
     private final RefreshTokenRepository refreshTokenRepository;
+    private final UserRepository userRepository;
     private final SecretKey signingKey;
     private final long accessTtlSeconds;
     private final long refreshTtlSeconds;
 
-    public TokenService(RefreshTokenRepository refreshTokenRepository,
-                         @Value("${app.jwt.secret:}") String configuredSecret,
-                         @Value("${app.jwt.access-ttl-seconds}") long accessTtlSeconds,
-                         @Value("${app.jwt.refresh-ttl-seconds}") long refreshTtlSeconds,
-                         Environment environment) {
+    public TokenService(
+            RefreshTokenRepository refreshTokenRepository,
+            UserRepository userRepository,
+            @Value("${app.jwt.secret:}") String configuredSecret,
+            @Value("${app.jwt.access-ttl-seconds}") long accessTtlSeconds,
+            @Value("${app.jwt.refresh-ttl-seconds}") long refreshTtlSeconds,
+            Environment environment) {
+
         this.refreshTokenRepository = refreshTokenRepository;
+        this.userRepository = userRepository;
         this.accessTtlSeconds = accessTtlSeconds;
         this.refreshTtlSeconds = refreshTtlSeconds;
-        this.signingKey = Keys.hmacShaKeyFor(resolveSecret(configuredSecret, environment).getBytes(StandardCharsets.UTF_8));
+
+        this.signingKey = Keys.hmacShaKeyFor(
+                resolveSecret(configuredSecret, environment)
+                        .getBytes(StandardCharsets.UTF_8)
+        );
     }
 
     /**
-     * Tactica "Exception Prevention" (Cap. 4): una clave de JWT por defecto
-     * en un despliegue real permitiria a cualquiera forjar tokens validos.
-     * Es preferible que el proceso se niegue a arrancar a que arranque
-     * inseguro en silencio.
+     * En perfil docker la aplicacion no arranca sin un JWT_SECRET seguro.
      */
     private static String resolveSecret(String configured, Environment environment) {
-        boolean isDockerProfile = Arrays.asList(environment.getActiveProfiles()).contains("docker");
+
+        boolean isDockerProfile =
+                Arrays.asList(environment.getActiveProfiles()).contains("docker");
+
         if (configured == null || configured.isBlank()) {
+
             if (isDockerProfile) {
                 throw new IllegalStateException(
-                        "JWT_SECRET no esta definido. La aplicacion se niega a arrancar en el perfil "
-                                + "'docker' sin un secreto explicito (Exception Prevention, Cap. 4).");
+                        "JWT_SECRET no esta definido. La aplicacion se niega a arrancar "
+                                + "en el perfil 'docker' sin un secreto explicito."
+                );
             }
-            log.warn("event=jwt_secret_dev_fallback perfil sin JWT_SECRET: usando clave insegura de "
-                    + "desarrollo, NUNCA usar en produccion");
+
+            log.warn(
+                    "event=jwt_secret_dev_fallback perfil sin JWT_SECRET: "
+                            + "usando clave insegura de desarrollo, NUNCA usar en produccion"
+            );
+
             return DEV_INSECURE_SECRET;
         }
+
         if (configured.getBytes(StandardCharsets.UTF_8).length < 32) {
-            throw new IllegalStateException("JWT_SECRET debe tener al menos 32 bytes (256 bits) para HMAC-SHA256");
+            throw new IllegalStateException(
+                    "JWT_SECRET debe tener al menos 32 bytes (256 bits) para HMAC-SHA256"
+            );
         }
+
         return configured;
     }
 
-    // Emitir toca la BD (persiste el refresh token): unico punto del ciclo de
-    // sesion donde el tier de datos sigue en el camino critico, y a proposito
-    // solo para el 5% del trafico que es login.
     @CircuitBreaker(name = "dataTier", fallbackMethod = "issueFallback")
     @Transactional
     public TokenPair issue(User user) {
+
         Instant now = Instant.now();
-        String accessToken = buildAccessToken(user.getId(), user.getUsername(), now);
-        RefreshTokenEntity refresh = persistRefreshToken(user.getId(), user.getUsername(), now);
-        return new TokenPair(accessToken, refresh.getToken(), user.getUsername(),
-                now.plusSeconds(accessTtlSeconds), refresh.getExpiresAt());
+
+        String accessToken = buildAccessToken(
+                user.getId(),
+                user.getUsername(),
+                user.getRole(),
+                now
+        );
+
+        RefreshTokenEntity refresh = persistRefreshToken(
+                user.getId(),
+                user.getUsername(),
+                now
+        );
+
+        return new TokenPair(
+                accessToken,
+                refresh.getToken(),
+                user.getUsername(),
+                now.plusSeconds(accessTtlSeconds),
+                refresh.getExpiresAt()
+        );
     }
 
     @SuppressWarnings("unused")
     private TokenPair issueFallback(User user, Throwable t) {
+
         if (t instanceof AppException appException) {
             throw appException;
         }
+
         throw new DataUnavailableException(t);
     }
 
     /**
-     * Verificacion de firma + expiracion en memoria. CERO dependencia del
-     * tier de datos: esta es la razon de ser de la Fase 1.
+     * Valida firma, expiracion y claims del access token sin consultar la BD.
      */
     public AccessClaims validateAccessToken(String token) {
+
         try {
-            Claims claims = Jwts.parser().verifyWith(signingKey).build()
+            Claims claims = Jwts.parser()
+                    .verifyWith(signingKey)
+                    .build()
                     .parseSignedClaims(token)
                     .getPayload();
-            return new AccessClaims(Long.valueOf(claims.getSubject()),
+
+            String roleClaim = claims.get("role", String.class);
+
+            if (roleClaim == null) {
+                throw new IllegalArgumentException("JWT sin claim role");
+            }
+
+            Role role = Role.valueOf(roleClaim);
+
+            return new AccessClaims(
+                    Long.valueOf(claims.getSubject()),
                     claims.get("username", String.class),
-                    claims.getExpiration().toInstant());
+                    role,
+                    claims.getExpiration().toInstant()
+            );
+
         } catch (JwtException | IllegalArgumentException e) {
-            // firma invalida, token mal formado o expirado: EXPECTED, no es
-            // una caida de nada, es la definicion misma de "sesion invalida".
-            // NumberFormatException (un token viejo cuyo subject era el
-            // username, no el ID) es IllegalArgumentException y cae aqui: un
-            // token del formato anterior se rechaza como sesion invalida en
-            // vez de reventar con un 500.
             throw new InvalidSessionException();
         }
     }
 
-    // Rotacion: el refresh token usado se invalida al canjearlo por uno nuevo,
-    // limitando el impacto de un refresh token capturado (Limit Exposure, Cap. 4).
+    /**
+     * El refresh consulta el usuario actual porque esta operacion ya depende
+     * de PostgreSQL. Asi respeta cambios de username, role y active.
+     */
     @CircuitBreaker(name = "dataTier", fallbackMethod = "refreshFallback")
     @Transactional
     public TokenPair refresh(String refreshTokenValue) {
-        RefreshTokenEntity stored = refreshTokenRepository.findByToken(refreshTokenValue)
+
+        RefreshTokenEntity stored = refreshTokenRepository
+                .findByToken(refreshTokenValue)
                 .orElseThrow(InvalidSessionException::new);
+
         Instant now = Instant.now();
+
         refreshTokenRepository.deleteByToken(refreshTokenValue);
+
         if (stored.isExpired(now)) {
             throw new InvalidSessionException();
         }
-        String accessToken = buildAccessToken(stored.getUserId(), stored.getUsername(), now);
-        RefreshTokenEntity newRefresh = persistRefreshToken(stored.getUserId(), stored.getUsername(), now);
-        return new TokenPair(accessToken, newRefresh.getToken(), stored.getUsername(),
-                now.plusSeconds(accessTtlSeconds), newRefresh.getExpiresAt());
+
+        User user = userRepository
+                .findByIdAndActiveTrue(stored.getUserId())
+                .orElseThrow(InvalidSessionException::new);
+
+        String accessToken = buildAccessToken(
+                user.getId(),
+                user.getUsername(),
+                user.getRole(),
+                now
+        );
+
+        RefreshTokenEntity newRefresh = persistRefreshToken(
+                user.getId(),
+                user.getUsername(),
+                now
+        );
+
+        return new TokenPair(
+                accessToken,
+                newRefresh.getToken(),
+                user.getUsername(),
+                now.plusSeconds(accessTtlSeconds),
+                newRefresh.getExpiresAt()
+        );
     }
 
     @SuppressWarnings("unused")
     private TokenPair refreshFallback(String refreshTokenValue, Throwable t) {
+
         if (t instanceof AppException appException) {
             throw appException;
         }
+
         throw new DataUnavailableException(t);
     }
 
-    // DELETE por token: reintentarlo es seguro, borrar dos veces da el mismo
-    // resultado. Logout es best-effort si el tier de datos esta caido: el
-    // token de acceso de todas formas expira solo dentro de accessTtlSeconds.
-    @CircuitBreaker(name = "dataTier", fallbackMethod = "revokeRefreshTokenFallback")
+    @CircuitBreaker(
+            name = "dataTier",
+            fallbackMethod = "revokeRefreshTokenFallback"
+    )
     @Transactional
     public RevokeResult revokeRefreshToken(String refreshTokenValue) {
+
         refreshTokenRepository.deleteByToken(refreshTokenValue);
+
         return new RevokeResult(true, null);
     }
 
     @SuppressWarnings("unused")
-    private RevokeResult revokeRefreshTokenFallback(String refreshTokenValue, Throwable t) {
+    private RevokeResult revokeRefreshTokenFallback(
+            String refreshTokenValue,
+            Throwable t) {
+
         if (t instanceof AppException appException) {
             throw appException;
         }
-        log.atInfo().addKeyValue("event", "logout_degraded").log("logout_degraded");
-        return new RevokeResult(false,
-                "El tier de datos no esta disponible: el refresh token no se pudo revocar, pero el "
-                        + "token de acceso expira solo en <= " + accessTtlSeconds + "s");
+
+        log.atInfo()
+                .addKeyValue("event", "logout_degraded")
+                .log("logout_degraded");
+
+        return new RevokeResult(
+                false,
+                "El tier de datos no esta disponible: el refresh token no se pudo revocar, "
+                        + "pero el token de acceso expira solo en <= "
+                        + accessTtlSeconds
+                        + "s"
+        );
     }
 
-    private RefreshTokenEntity persistRefreshToken(Long userId, String username, Instant now) {
+    private RefreshTokenEntity persistRefreshToken(
+            Long userId,
+            String username,
+            Instant now) {
+
         RefreshTokenEntity entity = new RefreshTokenEntity(
-                generateOpaqueToken(), userId, username, now, now.plusSeconds(refreshTtlSeconds));
+                generateOpaqueToken(),
+                userId,
+                username,
+                now,
+                now.plusSeconds(refreshTtlSeconds)
+        );
+
         return refreshTokenRepository.save(entity);
     }
 
     /**
-     * El subject es el ID del usuario, NO su username. Razon (Taller 2): el
-     * username es mutable -un usuario puede cambiarlo desde su perfil- y si
-     * fuera el subject, todo token vigente en ese momento (hasta 15 min)
-     * quedaria apuntando a un identificador que ya no resuelve a nadie. El ID
-     * es inmutable, asi que el cambio de username deja de ser un evento que
-     * invalida sesiones. El username viaja como claim aparte porque los
-     * consumidores (validate, el frontend) lo quieren para mostrarlo, no para
-     * identificar.
+     * El subject usa el ID porque es inmutable.
+     * El role viaja firmado para poder autorizar sin consultar PostgreSQL.
      */
-    private String buildAccessToken(Long userId, String username, Instant now) {
+    private String buildAccessToken(
+            Long userId,
+            String username,
+            Role role,
+            Instant now) {
+
         return Jwts.builder()
                 .subject(String.valueOf(userId))
                 .claim("username", username)
+                .claim("role", role.name())
                 .id(UUID.randomUUID().toString())
                 .issuer(ISSUER)
                 .issuedAt(Date.from(now))
@@ -218,23 +306,30 @@ public class TokenService {
     }
 
     private static String generateOpaqueToken() {
+
         byte[] bytes = new byte[32];
         RANDOM.nextBytes(bytes);
+
         return HexFormat.of().formatHex(bytes);
     }
 
-    public record TokenPair(String accessToken, String refreshToken, String username,
-                             Instant accessExpiresAt, Instant refreshExpiresAt) {
+    public record TokenPair(
+            String accessToken,
+            String refreshToken,
+            String username,
+            Instant accessExpiresAt,
+            Instant refreshExpiresAt) {
     }
 
-    /**
-     * userId es la identidad real del portador (subject del JWT); username es
-     * solo informativo y puede haber cambiado despues de emitirse el token.
-     * Toda autorizacion debe apoyarse en userId, nunca en username.
-     */
-    public record AccessClaims(Long userId, String username, Instant expiresAt) {
+    public record AccessClaims(
+            Long userId,
+            String username,
+            Role role,
+            Instant expiresAt) {
     }
 
-    public record RevokeResult(boolean revoked, String note) {
+    public record RevokeResult(
+            boolean revoked,
+            String note) {
     }
 }

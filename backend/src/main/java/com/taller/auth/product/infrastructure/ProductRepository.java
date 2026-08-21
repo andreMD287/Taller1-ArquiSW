@@ -5,18 +5,17 @@ import java.util.Optional;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import com.taller.auth.product.domain.Product;
 
 /**
  * Contrato de persistencia para productos.
  *
- * Debido a que el sistema utiliza borrado logico, las operaciones normales
- * deben utilizar consultas que filtren explicitamente por active=true.
- *
- * Los metodos heredados de JpaRepository como findAll() y findById() no
- * aplican este filtro automaticamente y no deben utilizarse para consultas
- * funcionales de productos activos.
+ * El borrado logico se aplica mediante consultas explicitas active=true.
+ * Los metodos heredados findAll/findById no deben utilizarse para las
+ * operaciones funcionales del CRUD.
  */
 public interface ProductRepository extends JpaRepository<Product, Long> {
 
@@ -24,8 +23,20 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
 
     Page<Product> findAllByActiveTrue(Pageable pageable);
 
+    /**
+     * Busqueda parcial case-insensitive.
+     *
+     * Se expresa explicitamente con lower(name) para que PostgreSQL pueda
+     * aprovechar el indice trigram GIN definido sobre lower(name).
+     */
+    @Query("""
+            select p
+            from Product p
+            where p.active = true
+              and lower(p.name) like lower(concat('%', :name, '%'))
+            """)
     Page<Product> findByNameContainingIgnoreCaseAndActiveTrue(
-            String name,
+            @Param("name") String name,
             Pageable pageable
     );
 
