@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Pruebas — tier de presentación</title>
+</head>
+<body>
+    <h1>Pruebas del tier de presentación</h1>
+    <p>
+        Sirve el repositorio por HTTP (por ejemplo <code>python3 -m http.server 8123</code>)
+        y abre <code>/frontend/tests/index.html</code>: los módulos ES no se cargan
+        desde <code>file://</code>. Resultados en la consola del navegador y aquí abajo.
+    </p>
+    <pre id="salida"></pre>
+    <script type="module">
+        import { run } from "./harness.js";
+        import "./platform.test.js";
+
+        const salida = document.getElementById("salida");
+        const result = await run({
+            log: (line) => {
+                console.log(line);
+                salida.textContent += line + "\n";
+            }
+        });
+        document.title = (result.failed === 0 ? "OK" : "FALLAN " + result.failed) + " — pruebas";
+    </script>
+</body>
+</html>
