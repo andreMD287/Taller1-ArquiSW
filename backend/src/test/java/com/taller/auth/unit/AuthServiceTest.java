@@ -23,6 +23,7 @@ import com.taller.auth.dto.TokenResponse;
 import com.taller.auth.exception.AccountLockedException;
 import com.taller.auth.exception.InvalidCredentialsException;
 import com.taller.auth.exception.UserAlreadyExistsException;
+import com.taller.auth.model.Role;
 import com.taller.auth.model.User;
 import com.taller.auth.repository.UserRepository;
 import com.taller.auth.service.AuthService;
@@ -317,31 +318,28 @@ class AuthServiceTest {
     }
 
     @Test
-    void validateDelegaEnTokenServiceSinTocarElRepositorioDeUsuarios() {
+void validateDelegaEnTokenServiceSinTocarElRepositorioDeUsuarios() {
 
-        when(
-                tokenService
-                        .validateAccessToken("jwt")
-        ).thenReturn(
-                new TokenService.AccessClaims(
-                        1L,
-                        "alice",
-                        Instant.now().plusSeconds(900)
-                )
-        );
+    when(
+            tokenService
+                    .validateAccessToken("jwt")
+    ).thenReturn(
+            new TokenService.AccessClaims(
+                    1L,
+                    "alice",
+                    Role.USER,
+                    Instant.now().plusSeconds(900)
+            )
+    );
 
-        authService.validate("jwt");
+    authService.validate("jwt");
 
-        verify(tokenService)
-                .validateAccessToken("jwt");
+    verify(tokenService)
+            .validateAccessToken("jwt");
 
-        /*
-         * Validar JWT debe seguir siendo stateless.
-         * No toca PostgreSQL.
-         */
-        verify(userRepository, never())
-                .findByUsernameAndActiveTrue(any());
-    }
+    verify(userRepository, never())
+            .findByUsernameAndActiveTrue(any());
+}
 
     @Test
     void logoutDelegaLaRevocacionEnTokenService() {
