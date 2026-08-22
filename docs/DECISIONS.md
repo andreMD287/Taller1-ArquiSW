@@ -234,7 +234,14 @@ feature toggles del mismo modo.
 
 ---
 
-## ADR-004 (parcial) — El motor acumula violaciones, no falla al primer error
+## ADR-004 — Dónde vive cada validación y cómo se reportan las violaciones
+
+Esta decisión se tomó en dos momentos: primero la forma de reportar (4a), al
+diseñar el motor de reglas, y después el criterio de ubicación (4b), al definir
+qué valida cada capa. Se conservan como partes de una misma ADR porque
+responden a la misma pregunta desde dos ángulos.
+
+### 4a — El motor acumula violaciones, no falla al primer error
 
 **Fecha:** 2026-08-18
 **Estado:** Aceptada — **implementada**
@@ -275,7 +282,7 @@ un job por lotes o un test sin arrastrar la capa de presentación.
 
 ---
 
-## ADR-004 (resto) — Cada validación vive en la capa que le corresponde por naturaleza
+### 4b — Cada validación vive en la capa que le corresponde por naturaleza
 
 **Fecha:** 2026-08-18
 **Estado:** Aceptada
@@ -516,75 +523,49 @@ alguna respuesta de error de Taller 1 cambiara de forma.
 
 ---
 
-## ADR-016 — Granularidad de "módulo" y medida de respuesta del escenario
+## ADR-008 — La unicidad de producto se apoya en el nombre, no en un código propio
 
-**Fecha:** 2026-08-22
-**Estado:** Aceptada — cierra la nota que quedaba abierta
-
-### El problema
-
-La formulación original del escenario pedía *"≤2 módulos, sin tocar el frontend
-ni el módulo de usuarios"*, pero nunca definía qué cuenta como módulo. Con
-"módulo = paquete de capa" la medida es inalcanzable por diseño: un atributo que
-no aparece en la API no le sirve a nadie, así que como mínimo cambian `domain` y
-`api`. Y la parte de "sin tocar el frontend" **dejó de ser cierta** cuando el
-tier de presentación pasó a describir sus recursos con descriptores: agregar un
-atributo obliga a añadir una entrada en `frontend/src/resources/products.js`.
+**Fecha:** 2026-08-18
+**Estado:** Aceptada — **revisable**
 
 ### Decisión
 
-1. **Un módulo es una unidad con dueño y frontera propia** —del tamaño de
-   *productos* / *usuarios* / *presentación*—, no un paquete de capa. Es la
-   granularidad que el propio enunciado usa al hablar del "módulo de usuarios".
-2. La medida de respuesta pasa a **≤3 módulos**: el módulo de productos del
-   backend, el descriptor del tier de presentación y el esquema.
-3. Se agrega una medida que es la que **de verdad prueba la táctica**:
-   **0 archivos existentes modificados en el motor de reglas**.
+El identificador de negocio único de un producto es su `name`. No existe un SKU
+ni código propio.
 
 ### Razón
 
-Subir de 2 a 3 no es relajar la medida para que dé: es reconocer que el sistema
-tiene tres tiers y que un atributo de negocio los atraviesa. Lo que se gana a
-cambio es una medida que sí discrimina.
+El dominio del taller no exige un catálogo con codificación propia, y el nombre
+ya cumple la función de distinguir productos de cara al usuario. Introducir un
+SKU habría añadido un campo más, su formato, su validación y su migración, sin
+resolver ningún problema presente.
 
-El conteo de módulos es un mal indicador de modificabilidad por sí solo —se
-puede bajar agrupando código, que es justo lo contrario de lo que se quiere—.
-La segunda medida no se puede falsear: **agregar una regla no modifica ningún
-archivo previo**, consecuencia directa del *defer binding* de ADR-003. Si algún
-día alguien introduce un registro central de reglas, el conteo de módulos
-seguiría dando 3 y esta medida se rompería de inmediato.
+### Por qué se registra pese a ser, en apariencia, una no-decisión
 
-### Sobre el frontend
+Porque tiene una **condición de revisión explícita**: si más adelante se agrega
+un SKU o código de producto, **la unicidad debería moverse a ese campo** y el
+nombre dejaría de ser único. Sin dejarlo escrito, quien agregue el código no
+tendría forma de saber que existe una decisión que revisar, y el sistema
+terminaría con dos identificadores únicos compitiendo entre sí.
 
-Se declara explícitamente que el descriptor cambia, en vez de excluirlo del
-alcance para conservar la cifra original. El resultado sigue siendo fuerte: ese
-archivo es **datos, no comportamiento** —sin `fetch`, sin DOM, sin reglas— y
-**ningún otro archivo del frontend cambia**: ni el motor de CRUD, ni la
-plataforma, ni las vistas.
+ADR-009 depende de esta: el alcance de la unicidad del nombre —global o solo
+entre activos— deja de importar el día que la unicidad se mueva al código.
+
+### Relación con el ejercicio de modificabilidad
+
+El ejercicio cronometrado usa precisamente el SKU como atributo a agregar (ver
+[`EJERCICIO-MODIFICABILIDAD.md`](EJERCICIO-MODIFICABILIDAD.md)). Es deliberado:
+así el ejercicio es el primer paso real de una evolución ya prevista, no un
+cambio inventado para la demostración.
+
+Conviene notar que el ejercicio **solo agrega el campo y su regla de formato**;
+no mueve la unicidad. Eso sería un segundo paso y exigiría retomar esta ADR.
 
 ### Táctica del Cap. 8 aplicada
 
-Ninguna nueva: esta ADR no cambia el diseño, define cómo se mide. Se registra
-porque la medida de respuesta es parte del escenario y cambiarla sin dejar
-rastro sería ajustar la vara después de conocer el resultado.
-
-### Dónde queda
-
-Escenarios **ESC-M1** y **ESC-M2** en §4.3 del documento de arquitectura; guion
-reproducible en [`EJERCICIO-MODIFICABILIDAD.md`](EJERCICIO-MODIFICABILIDAD.md).
-
----
-
-## Decisiones pendientes
-
-| # | Tema | Estado |
-|---|---|---|
-| ADR-008 | Unicidad de producto por nombre — **revisable**: si más adelante se agrega un SKU/código propio, la unicidad debería moverse a ese campo | Registrada, revisable |
-| ADR-009 | **Alcance** de la unicidad de nombre: ¿se libera el nombre de un producto eliminado? | **Abierta — decisión de Rol 1** |
-| — | `ProductService` y controllers REST de Producto | **Bloqueado**: requiere `ProductRepository` de Rol 2 |
-| — | CRUD de Usuario (roles, soft delete, último ADMIN) | **Bloqueado**: requiere `role`/`active` en `User` y la taxonomía de roles de Rol 2 |
-
----
+Ninguna. Se registra como **supuesto con condición de revisión**, que es
+exactamente lo que la columna "Rationale and Assumptions" del cuestionario de la
+Tabla 8.2 pide capturar.
 
 ## ADR-009 — El nombre de un producto eliminado NO se reutiliza
 
@@ -792,35 +773,38 @@ duplicarlo en la base es puro beneficio.
 
 ---
 
-## Pendientes con Rol 2 al momento de la pausa
+## Estado de la coordinación
 
-Confirmado por Rol 2:
+Todo lo que estuvo bloqueado quedó resuelto. Se conserva el registro porque
+muestra qué dependía de quién y cómo se cerró — parte de la trazabilidad que
+pide el cuestionario.
 
-- Trabaja sobre `product/domain/Product.java`, sin crear otra entidad.
-- `ProductRepository` es su primera entrega, para desbloquear `ProductService`.
-- Refuerza en Postgres: `CHECK (stock >= 0)`, `CHECK (price > 0)`, `UNIQUE(name)`.
-- Filtrado de soft-delete por **métodos explícitos**, no `@Where` (cierra el
-  punto 3 del checklist **solo para `Product`**).
+| Punto | Estado |
+|---|---|
+| `ProductRepository`, entidades JPA y migraciones | Entregado |
+| `role` / `active` en `User`, taxonomía USER / ADMIN | Entregado |
+| Filtro JWT y `@EnableMethodSecurity` | Entregado — los `@PreAuthorize` se aplican de verdad |
+| Soft delete en `login()` | Resuelto con `findByUsernameAndActiveTrue` |
+| Seed del primer ADMIN (ADR-010) | Entregado en `V4__bootstrap_admin.sql` |
+| Índice para la búsqueda por nombre | Entregado en `V5__product_name_search_index.sql` |
+| Interlock del último ADMIN (ADR-015) | Implementado, con prueba de concurrencia contra PostgreSQL real |
+| Restricción de CORS | Cerrado. Se corrigió además un fallo silencioso de indentación que dejaba la configuración sin efecto (ver `CorsConfigTest`) |
 
-Sin respuesta todavía:
+### Pendiente conocido — la suite no está verde en un clon limpio
 
-1. **Soft-delete en `User`** — el punto 3 se respondió solo para `Product`. Hoy
-   `AuthService.login()` usa `findByUsername()`, que no filtra: cuando `User`
-   tenga `active`, **un usuario eliminado podrá seguir iniciando sesión**. Falta
-   decidir entre `findByUsernameAndActiveTrue` o el chequeo en el service.
-2. **Firma explícita de la búsqueda paginada**, que también debe filtrar activos:
-   `Page<Product> findByNameContainingIgnoreCaseAndActiveTrue(String, Pageable)`.
-3. **Punto 7 del checklist** — mecanismo anti-condición-de-carrera del último
-   ADMIN. "Validación transaccional" con `READ_COMMITTED` no impide que dos
-   admins eliminándose a la vez dejen el sistema en 0.
-4. **`role` y `active` en `User`**, taxonomía de roles, filtro JWT y
-   `@EnableMethodSecurity`. Sin los dos últimos, los `@PreAuthorize` que se
-   escriban **se ignoran en silencio**.
+`LastAdminConcurrencyIT` requiere un PostgreSQL real (perfil `postgres-it`). Sin
+esa base, falla al cargar el contexto y `./mvnw test` termina en **BUILD
+FAILURE**. No es un defecto del código que prueba: es que la prueba depende del
+entorno y nada la excluye por defecto.
 
-Riesgo asumido por la elección de métodos explícitos: `ProductRepository` hereda
-de `JpaRepository` los métodos `findAll()`, `findById()` y `findAll(Pageable)`,
-que **no filtran por `active`**. El filtro no es estructural — depende de la
-disciplina de quien llama. Se cubrirá con un test cuando exista el repositorio.
+Mientras no se marque con un tag de JUnit excluido por defecto —o se levante la
+base con Testcontainers—, la suite se ejecuta así:
+
+```bash
+./mvnw test -Dtest='!LastAdminConcurrencyIT' -DfailIfNoSpecifiedTests=false
+```
+
+Con esa exclusión: **124 tests en verde**.
 
 ## ADR-013 — Autenticación JWT y autorización basada en roles
 
@@ -996,3 +980,64 @@ momento. La misma petición será válida en cuanto exista otro ADMIN activo.
 El test de **concurrencia real** (dos transacciones simultáneas contra Postgres)
 lo monta Rol 2. Los tests de arriba verifican la lógica y el uso del mecanismo,
 no el comportamiento del motor bajo contención.
+
+---
+
+## ADR-016 — Granularidad de "módulo" y medida de respuesta del escenario
+
+**Fecha:** 2026-08-22
+**Estado:** Aceptada — cierra la nota que quedaba abierta
+
+### El problema
+
+La formulación original del escenario pedía *"≤2 módulos, sin tocar el frontend
+ni el módulo de usuarios"*, pero nunca definía qué cuenta como módulo. Con
+"módulo = paquete de capa" la medida es inalcanzable por diseño: un atributo que
+no aparece en la API no le sirve a nadie, así que como mínimo cambian `domain` y
+`api`. Y la parte de "sin tocar el frontend" **dejó de ser cierta** cuando el
+tier de presentación pasó a describir sus recursos con descriptores: agregar un
+atributo obliga a añadir una entrada en `frontend/src/resources/products.js`.
+
+### Decisión
+
+1. **Un módulo es una unidad con dueño y frontera propia** —del tamaño de
+   *productos* / *usuarios* / *presentación*—, no un paquete de capa. Es la
+   granularidad que el propio enunciado usa al hablar del "módulo de usuarios".
+2. La medida de respuesta pasa a **≤3 módulos**: el módulo de productos del
+   backend, el descriptor del tier de presentación y el esquema.
+3. Se agrega una medida que es la que **de verdad prueba la táctica**:
+   **0 archivos existentes modificados en el motor de reglas**.
+
+### Razón
+
+Subir de 2 a 3 no es relajar la medida para que dé: es reconocer que el sistema
+tiene tres tiers y que un atributo de negocio los atraviesa. Lo que se gana a
+cambio es una medida que sí discrimina.
+
+El conteo de módulos es un mal indicador de modificabilidad por sí solo —se
+puede bajar agrupando código, que es justo lo contrario de lo que se quiere—.
+La segunda medida no se puede falsear: **agregar una regla no modifica ningún
+archivo previo**, consecuencia directa del *defer binding* de ADR-003. Si algún
+día alguien introduce un registro central de reglas, el conteo de módulos
+seguiría dando 3 y esta medida se rompería de inmediato.
+
+### Sobre el frontend
+
+Se declara explícitamente que el descriptor cambia, en vez de excluirlo del
+alcance para conservar la cifra original. El resultado sigue siendo fuerte: ese
+archivo es **datos, no comportamiento** —sin `fetch`, sin DOM, sin reglas— y
+**ningún otro archivo del frontend cambia**: ni el motor de CRUD, ni la
+plataforma, ni las vistas.
+
+### Táctica del Cap. 8 aplicada
+
+Ninguna nueva: esta ADR no cambia el diseño, define cómo se mide. Se registra
+porque la medida de respuesta es parte del escenario y cambiarla sin dejar
+rastro sería ajustar la vara después de conocer el resultado.
+
+### Dónde queda
+
+Escenarios **ESC-M1** y **ESC-M2** en §4.3 del documento de arquitectura; guion
+reproducible en [`EJERCICIO-MODIFICABILIDAD.md`](EJERCICIO-MODIFICABILIDAD.md).
+
+---
