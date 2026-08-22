@@ -120,7 +120,16 @@ app:
     # que puede correr con un intervalo relajado.
     purge-interval-ms: 3600000
 
-    cors:
+  # CORS solo hace falta cuando el frontend de desarrollo corre en un origen
+  # distinto al del backend. En el despliegue real nginx publica el frontend y
+  # /api bajo el mismo origen, asi que el navegador no ejecuta CORS.
+  #
+  # OJO CON LA INDENTACION: la clave que lee CorsConfig es
+  # app.cors.allowed-origins. Si "cors" cuelga de "jwt", o si "allowed-origins"
+  # queda como hermano de "cors" en vez de hijo, el @Value cae a su valor por
+  # defecto y NO FALLA NADA: la configuracion deja de tener efecto en silencio.
+  # Cubierto por CorsConfigTest.
+  cors:
     allowed-origins:
       - http://localhost:8123
       - http://127.0.0.1:8123
