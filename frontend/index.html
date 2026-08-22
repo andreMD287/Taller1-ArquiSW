@@ -3,47 +3,82 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <title>Autenticación de Usuarios</title>
-
-    <link rel="stylesheet" href="styles.css">
+    <title>Panel de gestión</title>
+    <link rel="stylesheet" href="./styles.css">
 </head>
-
 <body>
 
-    <main class="login-container">
+<div class="app" data-app-shell>
 
-        <h1>Iniciar sesión</h1>
+    <!-- Estado de inicialización: visible mientras se restaura la sesión. -->
+    <section class="boot" data-view="boot" aria-live="polite">
+        <p class="boot__text">Restaurando la sesión…</p>
+    </section>
 
-        <form id="loginForm">
+    <!-- Aviso de degradación. Vive fuera de las vistas porque puede aparecer
+         tanto en el login como con la aplicación montada. -->
+    <aside class="banner" data-degraded-banner role="status" aria-live="polite" hidden>
+        <p class="banner__text" data-degraded-text></p>
+        <button type="button" class="button button--ghost" data-degraded-retry hidden>
+            Reintentar
+        </button>
+    </aside>
 
-            <label for="username">Usuario</label>
-            <input
-                type="text"
-                id="username"
-                placeholder="Nombre de usuario"
-                required
-            >
+    <!-- Vista de autenticación -->
+    <main class="login" data-view="login" hidden>
+        <h1 class="login__title">Iniciar sesión</h1>
 
-            <label for="password">Contraseña</label>
-            <input
-                type="password"
-                id="password"
-                placeholder="Contraseña"
-                required
-            >
+        <form class="login__form" data-login-form novalidate>
+            <div class="field">
+                <label class="field__label" for="login-username">Usuario</label>
+                <input class="field__input" id="login-username" name="username"
+                       type="text" autocomplete="username" data-login-username required>
+            </div>
 
-            <button type="submit">
-                Iniciar sesión
+            <div class="field">
+                <label class="field__label" for="login-password">Contraseña</label>
+                <input class="field__input" id="login-password" name="password"
+                       type="password" autocomplete="current-password" data-login-password required>
+            </div>
+
+            <button class="button button--primary" type="submit" data-login-submit>
+                Entrar
             </button>
-
         </form>
 
-        <p id="message"></p>
+        <p class="login__message" data-auth-message role="status" aria-live="polite"></p>
 
+        <!-- Diagnóstico para quien ya está en el login: por ejemplo, una
+             revocación remota que no se pudo confirmar. Vive DENTRO de esta
+             vista para que se vea de verdad cuando se muestra. -->
+        <p class="login__notice" data-login-notice role="status" aria-live="polite"></p>
     </main>
 
-    <script src="app.js"></script>
+    <!-- Aplicación autenticada -->
+    <div class="shell" data-view="app" hidden>
 
+        <header class="shell__header" data-app-header>
+            <h1 class="shell__title">Panel de gestión</h1>
+            <div class="shell__identity">
+                <span class="shell__user" data-user-name></span>
+                <span class="shell__role" data-user-role></span>
+                <button type="button" class="button button--ghost" data-logout>
+                    Cerrar sesión
+                </button>
+            </div>
+        </header>
+
+        <p class="shell__notice" data-notice role="status" aria-live="polite"></p>
+
+        <div class="shell__body">
+            <nav class="app-nav" data-resource-nav aria-label="Recursos"></nav>
+            <main class="shell__content" data-crud-container></main>
+        </div>
+
+    </div>
+
+</div>
+
+<script type="module" src="./src/app.js"></script>
 </body>
 </html>

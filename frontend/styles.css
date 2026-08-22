@@ -1,57 +1,250 @@
-* {
-    box-sizing: border-box;
+/* ==========================================================================
+   Estilos del tier de presentación.
+
+   Sin framework y sin toolchain (ADR-F01): CSS plano sobre las clases estables
+   que emiten la composición y el motor de CRUD.
+
+   Los estilos NO sustituyen comportamiento: los controles que un rol no puede
+   usar los oculta o deshabilita la composición y el motor, no una regla de CSS.
+   ========================================================================== */
+
+:root {
+    --fondo: #f4f5f7;
+    --superficie: #ffffff;
+    --borde: #d3d7de;
+    --texto: #1c1f24;
+    --texto-suave: #5a6270;
+    --primario: #1f5fbf;
+    --primario-oscuro: #17488f;
+    --peligro: #b4271f;
+    --aviso-fondo: #fff4d6;
+    --aviso-borde: #d9a400;
+    --error: #a01a13;
+    --foco: #0b63ce;
+    --radio: 6px;
 }
+
+* { box-sizing: border-box; }
+
+/* [hidden] debe ocultar de verdad, incluso sobre display de flex/grid. */
+[hidden] { display: none !important; }
 
 body {
     margin: 0;
-    font-family: Arial, sans-serif;
-    background-color: #f4f4f4;
-
-    min-height: 100vh;
-
-    display: flex;
-    justify-content: center;
-    align-items: center;
-}
-
-.login-container {
-    background-color: white;
-
-    width: 350px;
-    padding: 30px;
-
-    border-radius: 10px;
-
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-}
-
-h1 {
-    text-align: center;
-}
-
-form {
-    display: flex;
-    flex-direction: column;
-}
-
-label {
-    margin-top: 15px;
-    margin-bottom: 5px;
-}
-
-input {
-    padding: 10px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     font-size: 16px;
+    line-height: 1.5;
+    color: var(--texto);
+    background: var(--fondo);
 }
 
-button {
-    margin-top: 20px;
-    padding: 12px;
+/* Foco SIEMPRE visible: quitarlo deja la interfaz inutilizable con teclado. */
+:focus-visible {
+    outline: 3px solid var(--foco);
+    outline-offset: 2px;
+}
 
+/* ------------------------------ botones ---------------------------------- */
+
+.button,
+.crud__create, .crud__retry,
+.crud-form__submit, .crud-form__cancel,
+.crud-table__action, .crud-table__sort,
+.crud-pager__previous, .crud-pager__next,
+.app-nav__link {
+    font: inherit;
+    padding: 0.45rem 0.9rem;
+    border: 1px solid var(--borde);
+    border-radius: var(--radio);
+    background: var(--superficie);
+    color: var(--texto);
     cursor: pointer;
 }
 
-#message {
-    margin-top: 20px;
-    text-align: center;
+.button:hover:not(:disabled),
+.crud__create:hover:not(:disabled),
+.crud-table__action:hover:not(:disabled),
+.app-nav__link:hover { background: #eef1f6; }
+
+.button:disabled,
+.crud-form__submit:disabled, .crud-form__cancel:disabled,
+.crud-pager__previous:disabled, .crud-pager__next:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.button--primary, .crud-form__submit {
+    background: var(--primario);
+    border-color: var(--primario-oscuro);
+    color: #fff;
+}
+.button--primary:hover:not(:disabled), .crud-form__submit:hover:not(:disabled) {
+    background: var(--primario-oscuro);
+}
+
+/* Acción peligrosa: se distingue a simple vista, pero quien decide si existe
+   es la composición, no este color. */
+.crud-table__action--delete {
+    color: var(--peligro);
+    border-color: var(--peligro);
+}
+.crud-table__action--delete:hover { background: #fdecea; }
+
+/* ------------------------------- login ----------------------------------- */
+
+.boot { padding: 3rem 1rem; text-align: center; color: var(--texto-suave); }
+
+.login {
+    max-width: 24rem;
+    margin: 4rem auto;
+    padding: 2rem;
+    background: var(--superficie);
+    border: 1px solid var(--borde);
+    border-radius: var(--radio);
+}
+.login__title { margin-top: 0; font-size: 1.4rem; }
+.login__message { min-height: 1.5rem; color: var(--error); }
+.login__notice:empty { display: none; }
+.login__notice {
+    margin: 0.5rem 0 0;
+    padding: 0.6rem 0.75rem;
+    background: var(--aviso-fondo);
+    border: 1px solid var(--aviso-borde);
+    border-radius: var(--radio);
+}
+
+.field { display: flex; flex-direction: column; margin-bottom: 1rem; }
+.field__label { font-weight: 600; margin-bottom: 0.25rem; }
+.field__input,
+.crud-form__input,
+.crud__search {
+    font: inherit;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--borde);
+    border-radius: var(--radio);
+    background: var(--superficie);
+    color: var(--texto);
+}
+.crud-form__input[aria-invalid="true"] { border-color: var(--error); }
+
+/* ------------------------------- shell ----------------------------------- */
+
+.shell__header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1.25rem;
+    background: var(--superficie);
+    border-bottom: 1px solid var(--borde);
+}
+.shell__title { margin: 0; font-size: 1.25rem; }
+.shell__identity { display: flex; align-items: center; gap: 0.75rem; }
+.shell__user { font-weight: 600; }
+.shell__role {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--texto-suave);
+    border: 1px solid var(--borde);
+    border-radius: 999px;
+    padding: 0.1rem 0.6rem;
+}
+.shell__notice:empty { display: none; }
+.shell__notice {
+    margin: 0;
+    padding: 0.6rem 1.25rem;
+    background: var(--aviso-fondo);
+    border-bottom: 1px solid var(--aviso-borde);
+}
+
+.shell__body {
+    display: grid;
+    grid-template-columns: 13rem 1fr;   /* menú + área de contenido */
+    gap: 1.25rem;
+    padding: 1.25rem;
+    align-items: start;
+}
+.shell__content { min-width: 0; }       /* deja que la tabla desborde con scroll */
+
+.app-nav__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }
+.app-nav__link { width: 100%; text-align: left; }
+.app-nav__link[aria-current="page"] {
+    border-color: var(--primario);
+    background: #e8f0fc;
+    font-weight: 600;
+}
+
+/* ------------------------------- banner ---------------------------------- */
+
+.banner {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.75rem 1.25rem;
+    background: var(--aviso-fondo);
+    border-bottom: 1px solid var(--aviso-borde);
+}
+.banner__text { margin: 0; flex: 1 1 16rem; }
+
+/* -------------------------------- CRUD ----------------------------------- */
+
+.crud { background: var(--superficie); border: 1px solid var(--borde); border-radius: var(--radio); padding: 1rem; }
+.crud__title { margin: 0 0 0.75rem; font-size: 1.1rem; }
+.crud__toolbar { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-bottom: 0.75rem; }
+.crud__search-label { font-weight: 600; }
+.crud__search { flex: 1 1 12rem; }
+
+/* Estados de carga y error, con su reintento manual. */
+.crud__status:empty { display: none; }
+.crud__status { margin-bottom: 0.75rem; color: var(--texto-suave); }
+.crud__error { margin: 0; color: var(--error); font-weight: 600; }
+.crud__error-trace { margin: 0.15rem 0 0; font-size: 0.85rem; color: var(--texto-suave); }
+.crud__retry { margin-bottom: 0.75rem; }
+
+/* Tabla: desborda con scroll propio, nunca empuja el layout. */
+.crud__table-host { overflow-x: auto; }
+.crud-table { width: 100%; border-collapse: collapse; }
+.crud-table__caption { text-align: left; padding-bottom: 0.4rem; color: var(--texto-suave); font-size: 0.9rem; }
+.crud-table__header, .crud-table__cell {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--borde);
+    white-space: nowrap;
+}
+.crud-table__header { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--texto-suave); }
+.crud-table__sort { border: none; background: none; padding: 0; font: inherit; color: inherit; text-decoration: underline dotted; }
+.crud-table__row:hover { background: #f7f9fc; }
+.crud-table__cell--actions { display: flex; gap: 0.4rem; }
+.crud-table__message { color: var(--texto-suave); }
+.crud-table__message td { padding: 1rem 0.6rem; }
+
+.crud-cell--left { text-align: left; }
+.crud-cell--center { text-align: center; }
+.crud-cell--right { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Formulario */
+.crud-form { border: 1px solid var(--borde); border-radius: var(--radio); padding: 1rem; margin-bottom: 1rem; background: #fbfcfe; }
+.crud-form__legend { margin: 0 0 0.75rem; font-weight: 700; }
+.crud-form__field { display: flex; flex-direction: column; margin-bottom: 0.75rem; }
+.crud-form__label { font-weight: 600; margin-bottom: 0.25rem; }
+.crud-form__errors { list-style: none; margin: 0.3rem 0 0; padding: 0; color: var(--error); font-size: 0.9rem; }
+.crud-form__general-errors:empty { display: none; }
+.crud-form__general-errors { margin-bottom: 0.75rem; color: var(--error); }
+.crud-form__general-error { margin: 0.15rem 0; }
+.crud-form__actions { display: flex; gap: 0.5rem; }
+
+/* Paginador */
+.crud-pager { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.75rem; flex-wrap: wrap; }
+.crud-pager__status { margin: 0; color: var(--texto-suave); }
+
+/* --------------------------- pantalla estrecha ---------------------------- */
+
+@media (max-width: 640px) {
+    .shell__body { grid-template-columns: 1fr; }      /* el menú pasa arriba */
+    .app-nav__list { grid-auto-flow: column; overflow-x: auto; }
+    .shell__header { flex-direction: column; align-items: flex-start; }
+    .crud__toolbar { flex-direction: column; align-items: stretch; }
+    .login { margin: 1.5rem 1rem; padding: 1.25rem; }
 }
