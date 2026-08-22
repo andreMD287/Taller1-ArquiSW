@@ -49,14 +49,22 @@ ensure_secret postgres_password
 ensure_secret postgres_superuser_password
 ensure_secret repmgr_password
 
-echo "[deploy] construyendo auth-backend:latest..."
+echo "[deploy] construyendo auth-backend:latest (tier de logica)..."
 docker build -t auth-backend:latest .
+
+# Tier de presentacion. El contexto de build es ../frontend porque este script
+# ya hizo cd a backend/. Sin este paso, el servicio "web" de stack.yml
+# referenciaria una imagen inexistente y sus tareas quedarian en pending.
+echo "[deploy] construyendo auth-web:latest (tier de presentacion)..."
+docker build -t auth-web:latest ../frontend
 
 echo "[deploy] desplegando el stack '$STACK_NAME'..."
 docker stack deploy -c stack.yml "$STACK_NAME"
 
 echo ""
-echo "[deploy] listo. La API queda expuesta en http://localhost:8080 (routing mesh de Swarm)."
+echo "[deploy] listo."
+echo "[deploy]   aplicacion web  -> http://localhost        (tier de presentacion)"
+echo "[deploy]   API directa     -> http://localhost:8080   (tier de logica, para sondas y caos)"
 echo "[deploy] estado del stack: docker stack services $STACK_NAME"
 echo "[deploy] para sumar nodos a este swarm: 'docker swarm join-token worker' en este host,"
 echo "         y correr el comando resultante en cada nodo nuevo."

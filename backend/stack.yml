@@ -8,8 +8,11 @@ version: "3.8"
 # un cluster multi-nodo para poder evaluar el entregable.
 #
 # Lo que Swarm aporta nativamente sobre el docker-compose.yml anterior:
-# - routing mesh: reemplaza a nginx como balanceador. Ya no hay una unica
-#   instancia de balanceador que sea un SPOF.
+# - routing mesh: asume el BALANCEO, que antes hacia un nginx de instancia
+#   unica. Ya no hay una unica instancia de balanceador que sea un SPOF.
+#   Ojo con la confusion facil: el servicio "web" de este stack tambien es
+#   nginx, pero cumple un papel distinto -servidor web del tier de
+#   presentacion- y va replicado. Balanceo: routing mesh. Servir la UI: web.
 # - reprogramacion automatica de tareas caidas (Reconfiguration, Cap. 4):
 #   nadie corre "docker compose up" a mano cuando un nodo muere.
 # - rolling update con healthcheck y rollback automatico (ver
@@ -164,7 +167,9 @@ services:
     ports:
       # modo ingress (default): el routing mesh de Swarm balancea entre
       # TODAS las replicas sanas del servicio desde cualquier nodo del
-      # cluster. Sustituye por completo a nginx.
+      # cluster. Sustituye por completo al nginx balanceador de v1.0.
+      # Se sigue publicando el 8080 para que las sondas y los scripts de
+      # caos golpeen el tier de logica directo, sin pasar por presentacion.
       - target: 8080
         published: 8080
         protocol: tcp
@@ -183,6 +188,53 @@ services:
         order: start-first
         failure_action: rollback
         monitor: 30s
+        delay: 5s
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+      restart_policy:
+        condition: any
+
+  # TIER DE PRESENTACION. Sirve la aplicacion del frontend y hace de proxy
+  # inverso hacia el tier de logica bajo /api (ver frontend/nginx.conf).
+  #
+  # Este servicio NO contradice ADR-10. Aquel elimino nginx porque era un
+  # balanceador de INSTANCIA UNICA, un SPOF delante de componentes
+  # redundantes. Aqui nginx cumple otro papel -servidor web de la capa de
+  # presentacion, que antes no lo cumplia nadie- y ademas va replicado detras
+  # del routing mesh, asi que no hay una instancia unica por la que pase todo.
+  # El balanceo hacia el backend lo sigue haciendo el routing mesh.
+  web:
+    image: auth-web:latest
+    hostname: "web-{{.Task.Slot}}"
+    healthcheck:
+      # sonda propia del tier: no consulta al backend. Si lo hiciera, una
+      # caida del tier de logica sacaria de rotacion a los servidores web y
+      # el usuario no veria ni la pagina de error (mismo criterio que ADR-03).
+      # 127.0.0.1, no localhost: nginx escucha solo IPv4 y localhost resuelve
+      # antes a ::1, con lo que la sonda fallaria siempre (ver frontend/Dockerfile).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: ingress
+    networks:
+      - auth-net
+    deploy:
+      replicas: 2
+      placement:
+        preferences:
+          - spread: node.hostname
+      update_config:
+        parallelism: 1
+        order: start-first
+        failure_action: rollback
+        monitor: 15s
         delay: 5s
       rollback_config:
         parallelism: 1

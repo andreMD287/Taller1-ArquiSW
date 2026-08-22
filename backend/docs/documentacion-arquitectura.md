@@ -1,5 +1,5 @@
 # Documento de Arquitectura de Software
-## Sistema de autenticación de usuarios — Arquitectura 3-tier
+## Autenticación de usuarios y gestión de productos — Arquitectura 3-tier
 
 **Curso:** Arquitectura de Software
 **Marco de referencia:** Bass, Clements & Kazman, *Software Architecture in Practice*, 4.ª ed. — Capítulos 1, 2, 3, 4 y 5
@@ -34,7 +34,7 @@
 10. [Patrones arquitectónicos](#10-patrones-arquitectónicos)
 11. [Análisis cuantitativo de disponibilidad](#11-análisis-cuantitativo-de-disponibilidad)
 12. [Plan de medición y experimentos](#12-plan-de-medición-y-experimentos)
-13. [Cuestionario basado en tácticas](#13-cuestionario-basado-en-tácticas)
+13. [Cuestionario y priorización de tácticas](#13-cuestionario-y-priorización-de-tácticas)
 14. [Deuda arquitectónica, riesgos y trabajo futuro](#14-deuda-arquitectónica-riesgos-y-trabajo-futuro)
 15. [Trazabilidad](#15-trazabilidad)
 
@@ -159,9 +159,15 @@ la Fase 4 (HA de Postgres) se implementó como MVP con limitaciones documentadas
 |---|---|---|
 | 1 | **Disponibilidad** | Objeto del Cap. 4 y objetivo explícito del enunciado |
 | 2 | **Desplegabilidad** | Objeto del Cap. 5; además condiciona la disponibilidad, porque los despliegues son una causa mayor de caídas |
-| 3 | Modificabilidad | Habilita las dos anteriores: sin separación de responsabilidades no hay despliegue granular |
+| 3 | **Modificabilidad** | Objeto del Cap. 8 y **atributo central del Taller 2**. Habilita además las dos anteriores: sin separación de responsabilidades no hay despliegue granular |
 | 4 | Seguridad | Requisito del dominio (contraseñas, tokens), tratado como higiene, no como objeto de estudio |
-| 5 | Desempeño | Se mide (p95) pero no se optimiza |
+| 5 | Desempeño | Se mide (p95); en Taller 2 pasa a tener objetivo explícito (<2 s) |
+
+**Ampliación del Taller 2.** El alcance original priorizaba dos atributos; el Taller 2 suma
+cuatro con tratamiento propio: **modificabilidad** (priorización de tácticas en §13.3,
+decisiones en [`docs/DECISIONS.md`](../../docs/DECISIONS.md)), **safety**, **rendimiento**
+(<2 s) y **eficiencia energética**. La modificabilidad ascendió de "habilitador" a objeto
+de estudio; los otros tres se documentan en sus entregables respectivos.
 
 ---
 
@@ -186,12 +192,18 @@ siendo una especificación sin evidencia directa.
 | **Medida de respuesta** | **0 peticiones fallidas** observadas por el cliente; reprogramación en **28 s medidos** (E2, sección 12); sin intervención humana |
 | **Verificado** | Sí — E2, dos corridas independientes, 28 s ambas veces |
 
-#### ESC-D2 — Caída del tier de datos
+#### ESC-D2 — Caída de la base de datos
+
+> **Nota de terminología (ver ADR-02).** El *tier de datos* es el módulo de acceso a datos
+> y corre dentro del mismo proceso que el tier de lógica: no puede caerse por separado. Lo
+> que se cae en este escenario es **PostgreSQL**, el recurso externo que ese tier
+> encapsula. En el código, el identificador `dataTier` (el circuit breaker de Resilience4j
+> y `DataTierHealthIndicator`) nombra la *dependencia hacia PostgreSQL*, no el tier.
 
 | Parte | Valor |
 |---|---|
 | **Fuente** | Externo al software: los procesos de PostgreSQL |
-| **Estímulo** | El tier de datos completo deja de responder |
+| **Estímulo** | La base de datos completa deja de responder |
 | **Artefacto** | Los 3 nodos de Postgres |
 | **Entorno** | Operación normal |
 | **Respuesta** | `/api/auth/validate` **no se entera**: se verifica en memoria (ADR-08), cero dependencia del tier de datos. `/login` y `/refresh` — las únicas operaciones que tocan la BD — responden `503 data_unavailable` mientras la BD esté abajo; ningún nodo sano se reinicia (`liveness` nunca consulta Postgres, ADR-03) |
@@ -203,11 +215,11 @@ local con `degraded: true` (ADR-04, ahora superado) para servir `validate` duran
 caída. Ahora **no hace falta ninguna táctica de degradación**, porque `validate` nunca
 tuvo una dependencia que degradar (ver ADR-08).
 
-#### ESC-D3 — Latencia anómala en el tier de datos
+#### ESC-D3 — Latencia anómala de la base de datos
 
 | Parte | Valor |
 |---|---|
-| **Fuente** | Interno: el tier de datos |
+| **Fuente** | Externo al software: PostgreSQL |
 | **Estímulo** | Una consulta tarda más de lo especificado |
 | **Artefacto** | Pool de conexiones del backend hacia el cluster Postgres |
 | **Entorno** | Operación normal, en `/login` o `/refresh` (los únicos que tocan la BD) |
@@ -314,21 +326,31 @@ Responde: *¿cómo está organizado el código y quién puede cambiar qué?*
 
 ```mermaid
 graph TD
-    subgraph tier2["Tier de lógica — com.taller.auth"]
-        C[controller<br/>borde HTTP]
-        S[service<br/>reglas de negocio + TokenService]
-        R[repository<br/>UserRepository, RefreshTokenRepository]
-        M[model<br/>User, RefreshTokenEntity]
-        D[dto<br/>contratos]
-        E[exception<br/>banda transversal]
-        CF[config<br/>seguridad, resiliencia, salud]
-        SE[security<br/>correlation id]
+    subgraph tierP["TIER DE PRESENTACIÓN — aplicación del navegador"]
+        V["src/crud/<br/>vista genérica y su coordinación"]
+        CT["src/resources/<br/>descriptores declarativos"]
+        MO["src/platform/<br/>http.js · session.js — transporte y estado"]
     end
+    subgraph tierL["TIER DE LÓGICA — reglas de negocio"]
+        C["controller · product.api<br/>borde HTTP, DTOs"]
+        S["service · product.application<br/>reglas de negocio, motor de reglas"]
+        E["exception<br/>banda transversal"]
+        CF["config · security<br/>infraestructura transversal"]
+    end
+    subgraph tierD["TIER DE DATOS — acceso a datos"]
+        R["repository · product.infrastructure<br/>UserRepository, RefreshTokenRepository,<br/>ProductRepository"]
+        M["model · product.domain<br/>User, RefreshTokenEntity, Product"]
+        TX["transacciones<br/>@Transactional, PESSIMISTIC_WRITE"]
+    end
+    DB[("PostgreSQL<br/>recurso externo, NO es un tier")]
+    V --> CT
+    CT --> MO
+    MO -->|HTTP /api| C
     C --> S
-    C --> D
     S --> R
-    S --> M
     R --> M
+    R --> TX
+    R -->|JDBC| DB
     C -.-> E
     S -.-> E
     R -.-> E
@@ -338,6 +360,35 @@ graph TD
 Nunca al revés. El servicio no conoce HTTP; el repositorio no conoce reglas de negocio.
 Esta es la aplicación directa de la regla estructural del Capítulo 1: *módulos con
 ocultamiento de información e interfaces separadas de las implementaciones*.
+
+**Dónde está la frontera entre el tier de lógica y el tier de datos:** en la interfaz de
+repositorio. Todo lo que está por encima trabaja con objetos de dominio y no sabe que
+existe un motor relacional; todo lo que está por debajo conoce JPA. Ninguna clase de
+`service` importa `jakarta.persistence`, y ninguna clase de `repository` contiene una
+regla de negocio. Esa es la comprobación mecánica de que la frontera es real y no
+decorativa.
+
+#### Mapeo entre tiers y paquetes
+
+El sistema tiene **dos estructuras simultáneas** que no son isomorfas, y el Capítulo 1 es
+explícito en que eso es normal: la organización del código (vista de módulos) y la
+separación de responsabilidades (vista de tiers) responden preguntas distintas.
+
+El código usa dos convenciones de empaquetado por razones documentadas en `docs/DECISIONS.md`
+(ADR-001 de Taller 2): el código original está organizado por capa técnica, y el módulo de
+productos por *vertical slice*. **Ambas convenciones se reparten entre los mismos dos
+tiers:**
+
+| Tier | Paquetes por capa técnica (auth) | Paquetes por vertical slice (productos) |
+|---|---|---|
+| **Lógica** | `controller`, `service`, `dto`, `exception`, `config`, `security` | `product.api`, `product.application` |
+| **Datos** | `repository`, `model` | `product.infrastructure`, `product.domain` |
+
+Que el tier de datos no sea **una sola carpeta** no significa que no exista como tier: su
+frontera es la interfaz de repositorio, y esa frontera es la misma en las dos convenciones.
+La alternativa —consolidar físicamente todo el acceso a datos en un paquete común— se
+evaluó y se descartó: rompería la cohesión del módulo de productos y degradaría el escenario
+de modificabilidad de Taller 2, que depende de que todo lo de un producto cambie junto.
 
 El paquete `model`/`repository` se redujo respecto a v1.0: `SessionEntity`/
 `SessionRepository` (la sesión persistida completa) desaparecieron; solo queda
@@ -359,10 +410,14 @@ Responde: *¿qué se está ejecutando y cómo se habla entre sí?*
 
 ```mermaid
 graph LR
-    NAV[Navegador] -->|HTTP/JSON<br/>routing mesh :8080| SWARM{{Swarm ingress}}
-    SWARM --> B1[backend #1<br/>Spring Boot]
-    SWARM --> B2[backend #2<br/>Spring Boot]
-    SWARM --> B3[backend #3<br/>Spring Boot]
+    NAV[Navegador] -->|HTTP :80| ING1{{Swarm ingress}}
+    ING1 --> W1["web #1<br/>nginx + app"]
+    ING1 --> W2["web #2<br/>nginx + app"]
+    W1 -->|proxy /api<br/>mismo origen| ING2{{Swarm ingress}}
+    W2 --> ING2
+    ING2 --> B1[backend #1<br/>Spring Boot]
+    ING2 --> B2[backend #2<br/>Spring Boot]
+    ING2 --> B3[backend #3<br/>Spring Boot]
     B1 -->|JDBC multi-host<br/>targetServerType=primary| PG1[(postgres-1)]
     B2 --> PG1
     B3 --> PG1
@@ -373,9 +428,27 @@ graph LR
     B3 -.->|stdout JSON| LOG
 ```
 
-**Cambio central respecto a v1.0:** nginx desapareció del diagrama por completo (ADR-10);
-el *routing mesh* de Swarm es infraestructura del propio orquestador, no un componente
-desplegado que pueda quedar como SPOF. Y las flechas backend→Postgres ya **no** son
+**Dónde está nginx y qué papel cumple.** Es una distinción que conviene tener clara porque
+en v1.0 los dos papeles estaban fundidos en un solo contenedor:
+
+| Papel | Quién lo cumple hoy | Antes (v1.0) |
+|---|---|---|
+| **Balancear** entre réplicas sanas | *Routing mesh* de Swarm (infraestructura del orquestador) | nginx de instancia única — el SPOF que eliminó ADR-10 |
+| **Servir la aplicación web** | Servicio `web`: nginx replicado (×2) con los estáticos de la aplicación | Nadie. El frontend no lo servía ningún proceso |
+
+Es decir: nginx **no volvió como balanceador** —eso sigue resuelto por el routing mesh, y
+ADR-10 sigue vigente— sino que **apareció donde nunca había estado**, como servidor web del
+tier de presentación. Al ir replicado detrás del routing mesh, no reintroduce el SPOF que
+ADR-10 identificó: el argumento de aquella decisión era contra la *instancia única*, no
+contra nginx.
+
+**El proxy `/api` no es comodidad, es arquitectura.** Al pasar por el mismo origen, el
+frontend no lleva ninguna URL de backend escrita en el código y el navegador no ejecuta
+CORS. Antes, `app.js` apuntaba a `http://localhost:8080` fijo —lo que hacía que la
+aplicación solo funcionara en la máquina del desarrollador— y el backend tenía que aceptar
+cualquier origen.
+
+**Las flechas backend→Postgres** ya **no** son
 uniformes: solo `/login` y `/refresh` las usan; `/validate` (el 95 % del tráfico) no tiene
 ninguna flecha hacia el tier de datos — se resuelve enteramente dentro del propio backend.
 Esa asimetría, invisible en el diagrama de v1.0 porque no existía, es el punto central de
@@ -395,6 +468,7 @@ Responde: *¿dónde vive cada cosa y qué se cae junto?*
 graph TB
     subgraph swarm["Swarm — 1 a N nodos, mismo stack.yml"]
         subgraph net["Red overlay auth-net"]
+            WS["Servicio web<br/>deploy.replicas: 2<br/>routing mesh :80"]
             BS["Servicio backend<br/>deploy.replicas: 3<br/>routing mesh :8080"]
             PS1["Servicio postgres-1<br/>bitnamilegacy/postgresql-repmgr"]
             PS2["Servicio postgres-2<br/>standby"]
@@ -409,8 +483,9 @@ graph TB
 ```
 
 **Unidades de falla:** cada tarea de Swarm es una unidad de falla independiente, y ahora
-**todas** son redundantes — las 3 réplicas de `backend` (Redundant Spare, ya lo eran en
-v1.0) y los 3 nodos de `postgres` (nuevo: Fase 4). El único SPOF de infraestructura que
+**todas** son redundantes — las 2 réplicas de `web` (nuevas: el tier de presentación nunca
+había estado desplegado), las 3 réplicas de `backend` (Redundant Spare, ya lo eran en
+v1.0) y los 3 nodos de `postgres` (Fase 4). El único SPOF de infraestructura que
 queda, y que se documenta a propósito en vez de esconderse, es el **almacenamiento local
 por nodo**: los volúmenes de Postgres son locales a la máquina Swarm donde corre cada
 tarea (sección 14, DA-7).
@@ -474,27 +549,64 @@ solo aplican al 5 % del tráfico.
 
 **Estado:** aceptada
 **Contexto:** el enunciado exige 3 tiers con canal remoto.
-**Decisión:** presentación (cliente web), lógica (Spring Boot) y datos (PostgreSQL +
-capa repositorio) se despliegan como procesos y contenedores independientes.
+**Decisión:** presentación (servidor web + aplicación del navegador), lógica (servicios y reglas de
+negocio) y datos (módulo de acceso a datos: repositorios, entidades y transacciones) son
+los tres tiers. **PostgreSQL no es un tier: es el recurso externo que el tier de datos
+encapsula**, y vive detrás de él (ver ADR-02).
 **Consecuencias positivas:** cada tier escala y se despliega por separado; una caída del
 tier de datos no arrastra al de lógica; se puede hacer rolling upgrade de un tier sin
 tocar los otros.
 **Consecuencias negativas:** latencia de red en cada salto; hay que manejar fallas
 parciales que en un monolito no existirían; más piezas que operar.
 
-### ADR-02 — El tier de datos es PostgreSQL, no un servicio HTTP propio
+### ADR-02 — El tier de datos es el módulo de acceso a datos; la base de datos va aparte
 
-**Estado:** aceptada
-**Contexto:** el diagrama del taller muestra tres cajas de aplicación. Una lectura
-estricta pediría un tercer Spring Boot que exponga `/data/users`.
-**Decisión:** el tier de datos es el motor de base de datos más la capa `repository` que
-lo encapsula. La frontera remota es JDBC.
-**Justificación:** un tercer servicio HTTP agregaría un despliegue, otro circuit breaker,
-otra fuente de latencia y ~30 % más de código, sin cambiar ninguna conclusión del análisis
-de disponibilidad. El presupuesto de tiempo del taller (RE-6) no lo permite.
-**Mitigación:** gracias al patrón Repositorio, sustituir PostgreSQL por un servicio HTTP
-**no requeriría cambiar ninguna clase de la capa de negocio**. La decisión es reversible;
-esa reversibilidad es, en sí misma, el argumento de ocultamiento de información del Cap. 1.
+**Estado:** aceptada — **revisada** (esta ADR reemplaza la formulación anterior, que
+fusionaba el tier de datos con el motor de base de datos)
+
+**Contexto:** la arquitectura de referencia del curso define tres tiers —presentación,
+lógica y datos— **conectados a una base de datos**. La base de datos es, por lo tanto, una
+pieza distinta de los tres tiers, no uno de ellos. La formulación anterior de esta ADR
+decía que "el tier de datos es el motor de base de datos más la capa repositorio", lo que
+mezclaba dos cosas que la arquitectura de referencia separa a propósito.
+
+**Decisión:** el **tier de datos** es el módulo de acceso a datos: repositorios, entidades
+de persistencia y gestión de transacciones. Es el único que conoce JPA y el único que sabe
+que existe un motor relacional. **PostgreSQL es un recurso externo** al que ese tier se
+conecta por JDBC, no un tier del sistema.
+
+Consecuencias concretas de la corrección:
+
+| Elemento | Antes (formulación anterior) | Ahora |
+|---|---|---|
+| Repositorios y entidades | Dibujados dentro del tier de lógica (§5.1) | Son **el tier de datos** |
+| PostgreSQL | Considerado "el tier de datos" | Recurso externo detrás del tier de datos |
+| Frontera remota | tier de lógica ↔ Postgres | tier de datos ↔ Postgres (JDBC) |
+
+**Sobre el tier de datos como proceso desplegado:** el tier de datos es un módulo con
+frontera propia dentro del mismo proceso que el tier de lógica, no un servicio HTTP
+independiente. Un tercer servicio agregaría un despliegue, otro circuit breaker y otra
+fuente de latencia; además lo pondría **en serie** en la cadena de disponibilidad,
+obligando a replicarlo y a rehacer el modelo cuantitativo de la §11. Gracias al patrón
+Repositorio, esa promoción a servicio propio **no requeriría cambiar ninguna clase de la
+capa de negocio**: la decisión es reversible, y esa reversibilidad es en sí misma el
+argumento de ocultamiento de información del Cap. 1.
+
+**Nota sobre estructuras (Cap. 1):** que el tier de datos no sea una única carpeta no
+significa que no exista como tier. El Capítulo 1 es explícito en que un sistema tiene
+**varias estructuras simultáneas** y que cada una responde preguntas distintas: la vista de
+módulos describe cómo está empaquetado el código, y la vista de tiers describe la
+separación de responsabilidades en tiempo de ejecución. No tienen por qué ser isomorfas.
+El mapeo exacto entre ambas está en la §5.1.
+
+**Sobre JTA:** la gestión de transacciones de este tier usa `@Transactional` de Spring
+sobre `JpaTransactionManager`. **No se usa JTA**, y es una decisión, no un olvido: JTA
+existe para coordinar transacciones distribuidas (XA) sobre **varios** recursos
+transaccionales. Aquí hay un solo `DataSource`, así que JTA agregaría un coordinador de
+transacciones y su sobrecarga de protocolo de dos fases sin ninguna transacción distribuida
+que coordinar. Si en el futuro se incorpora un segundo recurso transaccional —una cola de
+mensajes, una segunda base de datos—, la migración a JTA sería necesaria y el punto de
+cambio sería la configuración del `PlatformTransactionManager`, no las clases anotadas.
 
 ### ADR-03 — `liveness` no consulta la base de datos
 
@@ -700,6 +812,69 @@ no a los ~29 s medidos aquí. Resolverlo de verdad exige almacenamiento distribu
 reproducible, con el backend sirviendo `/login` correctamente contra el nuevo primario
 sin reiniciarse (E9, sección 12).
 
+### ADR-12 — Tier de presentación: servicio web replicado con aplicación modular en el cliente
+
+**Estado:** aceptada
+
+**Contexto:** hasta esta versión, **el tier de presentación no existía como componente
+desplegado**. El diagrama lo mostraba como "cliente web (navegador)", pero el navegador es
+quien consume el sistema, no una parte de él. En la práctica: los archivos de `frontend/`
+no los servía ningún proceso, `stack.yml` no los mencionaba, la guía de uso no explicaba
+cómo abrirlos, y había que cargarlos desde el sistema de archivos. Como consecuencia
+directa, `CorsConfig` tenía que aceptar cualquier origen (`"*"`) y el JavaScript llevaba
+`http://localhost:8080` escrito en el código, lo que hacía que la aplicación solo
+funcionara en la máquina del desarrollador.
+
+Conviene señalar que **quitar nginx (ADR-10) no causó este hueco**: aquel nginx era
+exclusivamente proxy y balanceador —su configuración no servía un solo archivo estático—,
+así que nunca cumplió el papel de servidor web.
+
+**Decisión:** un servicio `web` replicado (×2) que cumple dos funciones:
+
+1. **Servidor web**: sirve el HTML, el CSS, `config.js` y los módulos de la aplicación.
+2. **Proxy inverso**: enruta `/api` hacia el tier de lógica.
+
+Y en el cliente, una aplicación que **separa presentación, coordinación y estado** —el
+mismo objetivo que persigue un MVC—, pero cuyo corte **no es por rol técnico**, sino por
+lo que cambia junto (ADR-F01 en `docs/DECISIONS-FRONTEND.md`):
+
+| Módulo | Responsabilidad | Regla verificable |
+|---|---|---|
+| `src/platform/` | Estado y comunicación: transporte (`http.js`), sesión (`session.js`), traducción de errores y métricas | `fetch(` productivo aparece **solo** en `http.js`; el estado de sesión vive **solo** en `session.js` |
+| `src/crud/` | Componentes de vista genéricos (tabla, formulario, paginador) y el motor que los coordina | No conoce ningún recurso concreto: lo recibe como descriptor |
+| `src/resources/` | Descriptores declarativos de cada recurso | Son **datos**: sin lógica, sin llamadas, sin DOM |
+| `config.js` | Enlace con el entorno (base de API, timeouts) | Fuera de `src/`: es configuración, no artefacto |
+
+`src/app.js` es el único archivo que conoce todos los lados: construye las piezas y las
+conecta, igual que la inyección de dependencias hace en el backend.
+
+La razón de este corte en vez del clásico `model/view/controller`: con carpetas por rol
+técnico, **agregar un recurso obliga a tocar las tres**. Con este corte, agregar un recurso
+es **añadir un descriptor** —un archivo de datos— sin tocar el motor ni la plataforma
+("Reduce Coupling / Restrict dependencies" y "Defer Binding", Cap. 8). La regla de
+separación se mantiene y además es comprobable por la suite del frontend, no solo por
+inspección del árbol.
+
+**Por qué módulos ES nativos y no un framework:** la separación queda **explícita y
+comprobable** en vez de implícita en un modelo de componentes, no hay paso de build ni
+`node_modules`, y la imagen del tier de presentación es nginx más archivos estáticos.
+
+**Por qué el proxy importa arquitectónicamente:** al ver un solo origen, el frontend no
+lleva ninguna URL de backend en el código y desaparece el CORS. Esto habilita cerrar
+`CorsConfig` a un origen concreto (pendiente, ver §14).
+
+**Sobre ADR-10:** este servicio **no la contradice**. ADR-10 eliminó un balanceador de
+*instancia única*, que era un SPOF delante de componentes redundantes. Aquí nginx cumple un
+papel distinto y va replicado detrás del routing mesh, que sigue siendo quien balancea. El
+argumento de ADR-10 era contra la instancia única, no contra nginx.
+
+**Consecuencia para disponibilidad:** el tier de presentación entra **en serie** en la
+cadena vista desde el navegador, así que su disponibilidad multiplica. Por eso se despliega
+replicado desde el principio: con 2 réplicas y reprogramación automática de Swarm, su
+aporte a la indisponibilidad es del mismo orden que el del tier de lógica y no domina el
+resultado de la §11. Las mediciones existentes siguen siendo válidas para la API, que se
+sigue publicando directamente en el puerto 8080 para las sondas.
+
 ---
 
 ## 7. Taxonomía de fallas: falta, error y fallo
@@ -763,20 +938,171 @@ momento).
 Si se contara como fallo, un usuario torpe bajaría la disponibilidad reportada y la
 métrica del 99.99 % no significaría nada.
 
+### 7.3 Vista de la gestión de excepciones
+
+Las tablas anteriores dicen *qué* errores existen. Esta vista muestra **dónde vive la
+gestión de excepciones dentro de la arquitectura** y qué recorrido hace una excepción desde
+que se lanza hasta que el cliente ve una respuesta.
+
+#### 7.3.1 Jerarquía: el tipo es el que transporta la decisión
+
+`AppException` es **abstracta**: no se instancia nunca, solo se hereda.
+
+```mermaid
+classDiagram
+    class AppException {
+        +String code
+        +FaultKind kind
+        +HttpStatus status
+        +boolean retryable
+    }
+    RuntimeException <|-- AppException
+    AppException <|-- InvalidCredentialsException
+    AppException <|-- AccountLockedException
+    AppException <|-- UserAlreadyExistsException
+    AppException <|-- InvalidSessionException
+    AppException <|-- DataUnavailableException
+    AppException <|-- BusinessRuleViolationException
+    AppException <|-- ProductNotFoundException
+```
+
+Cada subclase declara **de una vez** su código estable, su `FaultKind`, su status HTTP y si
+vale la pena reintentar. Eso significa que ningún `catch` disperso por el código tiene que
+decidir qué responder: la decisión viaja dentro del tipo de la excepción.
+
+#### 7.3.2 Recorrido de una excepción
+
+```mermaid
+flowchart TD
+    REQ["Petición HTTP"] --> FIL["RequestIdFilter<br/>genera requestId en el MDC"]
+    FIL --> CTRL["controller · product.api"]
+    CTRL --> SVC["service · product.application"]
+    SVC --> REPO["repository · product.infrastructure"]
+    REPO --> PG[("PostgreSQL")]
+
+    CTRL -. "MethodArgumentNotValidException<br/>(Bean Validation)" .-> GEH
+    SVC -. "InvalidCredentialsException<br/>AccountLockedException<br/>BusinessRuleViolationException<br/>ProductNotFoundException" .-> GEH
+    REPO -. "DataAccessException" .-> CB{"Circuit Breaker<br/>+ Retry<br/>Resilience4j"}
+    CB -. "DataUnavailableException<br/>(vía fallbackMethod)" .-> GEH
+    CB -. "AppException pasa de largo<br/>(ignore-exceptions)" .-> GEH
+
+    GEH["GlobalExceptionHandler<br/>@RestControllerAdvice<br/>ÚNICO punto de traducción"]
+    GEH --> MET["contador errors.&lt;kind&gt;<br/>Micrometer"]
+    GEH --> LOG["log estructurado<br/>con requestId"]
+    GEH --> RESP["ErrorResponse JSON<br/>code · kind · message<br/>retryable · requestId · violations"]
+```
+
+Tres propiedades que este diagrama hace visibles y que en una tabla no se ven:
+
+1. **Hay un solo punto de traducción.** Ningún controlador construye una `ErrorResponse` a
+   mano. Si mañana cambia el formato del cuerpo de error, cambia en un archivo.
+2. **El circuit breaker está en el camino, pero deja pasar los errores de negocio.**
+   `AppException` está en `ignore-exceptions` de Resilience4j, tanto del circuit breaker
+   como del retry. Sin eso, un usuario tecleando contraseñas equivocadas contaría como
+   fallas del tier de datos y podría **abrir el circuito para todos los demás**. Es la
+   frontera entre "el sistema funciona y dice que no" y "el sistema está roto".
+3. **Toda respuesta de error lleva el `requestId`** que generó `RequestIdFilter`, así que un
+   error reportado por un usuario se puede rastrear hasta su línea de log exacta.
+
+#### 7.3.3 Las tres tácticas de excepciones del Cap. 4, y dónde está cada una
+
+El catálogo del Capítulo 4 tiene **tres** tácticas distintas relacionadas con excepciones, y
+se confunden con facilidad porque comparten la palabra. Las tres están implementadas, en
+puntos distintos de la arquitectura:
+
+| Táctica | Qué hace | Dónde vive | Evidencia concreta |
+|---|---|---|---|
+| **Exception Prevention** (prevenir fallas, §8.4) | Impedir que la excepción llegue a existir | Borde de entrada y arranque | Bean Validation en los DTOs; tipos fuertes y `Optional` en vez de nulos; `TokenService.resolveSecret()` **se niega a arrancar** sin `JWT_SECRET` en el perfil `docker` |
+| **Exception Detection** (detectar fallas, §8.1) | Darse cuenta de que ocurrió algo no previsto | `GlobalExceptionHandler` | El handler de `Exception.class` es el único que registra el *stack trace* completo: cualquier cosa que llegue ahí es, por definición, una falta latente que se acaba de activar |
+| **Exception Handling** (recuperar de fallas, §8.2) | Que la excepción no tumbe el proceso y el cliente reciba algo útil | Banda transversal + fallbacks de Resilience4j | Ninguna excepción escapa como stack trace al cliente; los `fallbackMethod` degradan a `503 data_unavailable` en vez de propagar la falla; `logout` responde `202` en modo *best-effort* |
+
+**Por qué esto no es una sola táctica repetida:** la prevención actúa *antes* (el error no
+ocurre), la detección actúa *durante* (nos enteramos y lo clasificamos), y el manejo actúa
+*después* (contenemos el daño y respondemos). Un sistema puede tener una y no las otras: un
+`try/catch` genérico que se traga todo tiene manejo sin detección, y es exactamente el
+antipatrón que la separación de `FaultKind` evita aquí.
+
+#### 7.3.4 Dónde vive cada validación
+
+La gestión de excepciones no empieza cuando algo falla, sino en dónde se decide que algo es
+inválido. Hay tres capas, y cada regla vive en **una sola**:
+
+| Tipo | Dónde | Respuesta | Ejemplo |
+|---|---|---|---|
+| **Estructural** — falta el dato o no tiene la forma correcta | Bean Validation en el DTO (capa `api`) | `400 validation_error` | `@NotBlank`, `@NotNull`, `@Size` |
+| **Semántica de negocio** — el dato está bien formado pero la regla lo rechaza | Motor de reglas (capa `application`) | `422 business_rule_violation` con `violations[]` | precio > 0, stock ≥ 0, unicidad de nombre |
+| **Invariante inviolable** — no debe poder existir en la base | Constraint de BD | Traducida a `422` por el servicio | `UNIQUE(name)`, `CHECK (stock >= 0)` |
+
+Los dos códigos HTTP distintos no son un detalle de implementación: hacen **visible desde el
+cliente** la separación entre las dos primeras capas. Y la tercera se duplica a propósito
+con la segunda, porque cumplen papeles distintos — el backend produce el *mensaje* útil para
+el usuario, la constraint garantiza el *invariante* aunque una ruta de código futura se
+salte el motor de reglas. Es la diferencia entre "validar" y "no poder violar".
+
 ---
 
 ## 8. Tácticas de disponibilidad aplicadas (Cap. 4)
+
+### 8.0 Vista de tácticas sobre la arquitectura
+
+Las tablas de §8.1 a §8.4 listan las tácticas por categoría del libro. Esta vista las
+coloca **en el punto de la arquitectura donde actúan**, que es la pregunta que una tabla no
+responde: no *cuáles* tácticas hay, sino *dónde* está cada una.
+
+```mermaid
+flowchart TD
+    NAV["Navegador"]
+
+    subgraph P["TIER DE PRESENTACIÓN — servicio web ×2"]
+        WEB["nginx + app<br/>· Redundant Spare (2 réplicas)<br/>· Ping/Echo (HEALTHCHECK /healthz)<br/>· Removal from Service (routing mesh)"]
+    end
+
+    subgraph L["TIER DE LÓGICA — servicio backend ×3"]
+        API["controller · product.api<br/>· Exception Prevention (Bean Validation)"]
+        BIZ["service · product.application<br/>· Increase Competence Set (LockoutPolicy)<br/>· Transactions (noRollbackFor)<br/>· Interlock (último ADMIN, PESSIMISTIC_WRITE)"]
+        HLT["actuator<br/>· Ping/Echo (liveness)<br/>· Condition Monitoring (readiness)<br/>· Monitor (Micrometer)"]
+        EXC["exception<br/>· Exception Detection<br/>· Exception Handling"]
+    end
+
+    subgraph D["TIER DE DATOS — acceso a datos"]
+        RES["repository<br/>· Circuit Breaker (dataTier)<br/>· Retry (solo idempotentes)<br/>· Timestamp (exp del JWT)"]
+    end
+
+    PG[("PostgreSQL ×3<br/>· Redundant Spare (repmgr)<br/>· Leader Election<br/>· State Resync (pg_basebackup)<br/>· Sanity Checking (SELECT 1)")]
+
+    NAV --> WEB
+    WEB -->|proxy /api| API
+    API --> BIZ
+    BIZ --> RES
+    RES -->|JDBC| PG
+    API -.-> EXC
+    BIZ -.-> EXC
+    RES -.-> EXC
+```
+
+**Cómo leer este diagrama.** Cada táctica aparece una sola vez, en la caja donde está
+implementada. Tres lecturas que salen de aquí y que las tablas no dejan ver:
+
+- **La redundancia ya no tiene huecos.** Los tres tiers y la base de datos tienen
+  Redundant Spare. En v1.0, el tier de presentación no existía y Postgres era instancia
+  única.
+- **El circuit breaker está en el tier de datos, no en el de lógica.** Protege exactamente
+  la frontera remota que puede fallar, y por eso `/api/auth/validate` —que no llega hasta
+  esa caja— no puede responder `503` por causa de la base de datos.
+- **La banda de excepciones cruza los tres tiers** (las flechas punteadas). Es la única
+  preocupación transversal del diseño, y por eso se dibuja como destino de todos y no como
+  un paso más del recorrido.
 
 ### 8.1 Detectar fallas
 
 | Táctica | Implementación | Escenario que atiende |
 |---|---|---|
-| **Ping/Echo** | `GET /actuator/health/liveness`, consultado por el `HEALTHCHECK` de Docker en cada tarea de Swarm | ESC-D1, ESC-D6 |
+| **Ping/Echo** | `GET /actuator/health/liveness` en el tier de lógica y `GET /healthz` en el de presentación, consultados por el `HEALTHCHECK` de Docker en cada tarea de Swarm. La sonda del tier web **no** consulta al backend a propósito: si lo hiciera, una caída del tier de lógica sacaría de rotación a los servidores web y el usuario no vería ni la página de error (mismo criterio que ADR-03) | ESC-D1, ESC-D6 |
 | **Sanity Checking / Self-Test** | `DataTierHealthIndicator`: `SELECT 1` con timeout corto | ESC-D2, ESC-D7 |
 | **Condition Monitoring** | `readiness` evalúa el estado de las dependencias antes de aceptar tráfico; `repmgrd` monitorea la salud del primario en cada standby | ESC-D6, ESC-D7 |
 | **Monitor** | Actuator + Micrometer: contador `errors.<kind>`, etiquetado por `code`; estado del circuito expuesto en `/api/diagnostics` | Todos |
 | **Heartbeat** | Tarea `@Scheduled` que emite un latido con el `NODE_ID` (ahora derivado del hostname templado por Swarm, no fijado a mano) | ESC-D1 |
-| **Exception Detection** | `GlobalExceptionHandler` con handler de `Exception.class` | ESC-D4 |
+| **Exception Detection** | `GlobalExceptionHandler`, handler de `Exception.class`: es el **único** que registra el stack trace completo, porque cualquier excepción que llegue ahí es por definición una falta latente recién activada. Clasifica cada error con un `FaultKind` y lo cuenta en `errors.<kind>` (ver §7.3.2) | ESC-D4 |
 | **Timestamp** | `createdAt` / `expiresAt` en el refresh token y en el JWT (claim `exp`), para detectar estado obsoleto | ESC-D2 |
 
 **Diferencia que conviene tener clara en la sustentación:** *Ping/Echo* lo inicia el
@@ -788,9 +1114,9 @@ segundo no requiere que el monitor conozca a todos los nodos.
 
 | Táctica | Implementación | Escenario |
 |---|---|---|
-| **Redundant Spare (active / hot spare)** | 3 réplicas activas del backend tras el *routing mesh* de Swarm (antes 2, tras nginx); 3 nodos de Postgres con `repmgr` (nuevo, Fase 4) | ESC-D1, ESC-D7 |
+| **Redundant Spare (active / hot spare)** | 2 réplicas del servicio `web` (nuevo: el tier de presentación no existía); 3 réplicas activas del backend tras el *routing mesh* de Swarm (antes 2, tras nginx); 3 nodos de Postgres con `repmgr` (Fase 4). **Ya no queda ningún tier sin redundancia** | ESC-D1, ESC-D7 |
 | **Retry** | Resilience4j con backoff exponencial y *jitter*, solo sobre operaciones idempotentes (ADR-05) — ahora solo relevante para el 5 % del tráfico | ESC-D3 |
-| **Exception Handling** | La banda transversal: ninguna excepción termina el proceso | ESC-D4 |
+| **Exception Handling** | Ninguna excepción termina el proceso ni escapa como stack trace al cliente: `@RestControllerAdvice` traduce cada una a un `ErrorResponse` con código estable, y los `fallbackMethod` de Resilience4j degradan a `503 data_unavailable` en vez de propagar la falla. `logout` es *best-effort*: responde `202` si no pudo revocar. **Recorrido completo en §7.3.2** | ESC-D4 |
 | **Rollback** | `scripts/rollback.sh` → `docker service rollback`, declarativo (ver ESC-P2) | ESC-P2 |
 
 **Lo que ya no aparece aquí, y por qué es la noticia principal de esta sección:**
@@ -872,9 +1198,11 @@ en una sonda concurrente de 133 muestras.
 
 | Patrón | Dónde | Qué aporta |
 |---|---|---|
-| **Three-tier / N-tier** | Estructura global | Separación de responsabilidades con fronteras de despliegue |
+| **Three-tier / N-tier** | Estructura global | Presentación, lógica y datos como responsabilidades separadas; PostgreSQL es el recurso externo detrás del tier de datos, no un tier (ADR-02) |
+| **Separación presentación / coordinación / estado** | Tier de presentación (`frontend/src/`) | El mismo objetivo que un MVC, cortado por lo que cambia junto: `platform/` (estado y transporte), `crud/` (vista genérica y coordinación) y `resources/` (descriptores). Regla verificable: `fetch(` productivo solo en `platform/http.js` y estado de sesión solo en `platform/session.js` (ADR-12, ADR-F01) |
+| **Reverse Proxy** | Servicio `web` → `/api` | Un solo origen para el navegador: elimina el CORS y saca la URL del backend del código del cliente (ADR-12) |
 | **Layers** | Interior del tier de lógica | Dependencias en un solo sentido: controller → service → repository |
-| **Repository** | `repository/` | Oculta la decisión de motor de persistencia (habilita ADR-02) |
+| **Repository** | `repository`, `product.infrastructure` | **Es la frontera del tier de datos**: por encima se trabaja con objetos de dominio, por debajo se conoce JPA. Oculta la decisión de motor de persistencia (ADR-02) |
 | **Service Mesh liviano (routing mesh de Swarm)** | Infraestructura de Swarm | Reemplaza a Load-Balanced Cluster + nginx: redundancia activa sin un balanceador desplegado como componente propio (ADR-10) |
 | **Circuit Breaker** | Acceso al tier de datos (`/login`, `/refresh`) | Evita el fallo en cascada y el agotamiento del pool, ahora acotado al 5 % del tráfico |
 | **Leader Election** | Cluster de Postgres con `repmgr` | Base de ESC-D7: exactamente un primario en todo momento, con promoción automática (Fase 4) |
@@ -1089,56 +1417,125 @@ para que una sonda por sí sola tuviera significancia estadística sobre un pres
 
 ---
 
-## 13. Cuestionario basado en tácticas
+## 13. Cuestionario y priorización de tácticas
 
-Formato del Capítulo 3: para cada táctica, si está soportada, el riesgo de su ausencia o
-implementación parcial, la decisión de diseño y su ubicación.
+Formato del Capítulo 3: para cada táctica, si está soportada, la decisión de diseño y su
+ubicación. Se agrega la **priorización**, porque el catálogo del libro es deliberadamente
+exhaustivo y aplicarlo entero no es una meta: el Cap. 4 lista 25 tácticas de
+disponibilidad, el Cap. 5 nueve de desplegabilidad y el Cap. 8 ocho de modificabilidad.
+Adoptarlas todas multiplicaría piezas que operar sin mover las medidas de respuesta, y
+varias son directamente inaplicables a este dominio.
 
-### 13.1 Disponibilidad
+**La pregunta que responde esta sección no es "¿cuáles existen?" sino "¿cuáles elegimos y
+por qué esas".**
 
-| Táctica | ¿Soportada? | Riesgo | Decisión y ubicación | Justificación |
-|---|---|---|---|---|
-| Ping/Echo | Sí | L | `HEALTHCHECK` de Docker sobre `liveness`, consumido por el *routing mesh* de Swarm | Detección sin depender de un balanceador externo |
-| Monitor | Sí | L | Micrometer + `/actuator/metrics` | Base de toda medición |
-| Heartbeat | Sí | L | `@Scheduled` con `NODE_ID` (hostname templado por Swarm) | Complementa Ping/Echo |
-| Timestamp | Sí | L | `exp` del JWT; `expiresAt` del refresh token | Detecta estado obsoleto |
-| Condition Monitoring | Sí | L | `DataTierHealthIndicator`; `repmgrd` sobre el primario | Alimenta readiness y ESC-D7 |
-| Sanity Checking | Sí | L | `SELECT 1` con timeout | Self-test del tier |
-| Voting | **No** | L | — | Requiere réplicas que calculen lo mismo; no aplica a este dominio |
-| Exception Detection | Sí | L | `GlobalExceptionHandler` | Ninguna excepción pasa inadvertida |
-| Self-Test | Sí | L | `SELECT 1` en cada consulta a `readiness` | `DataTierHealthIndicator` |
-| Redundant Spare | Sí | L | 3 réplicas de backend + 3 nodos de Postgres (Fase 4) | ESC-D1, ESC-D7 |
-| Rollback | Sí | L | `docker service rollback`, declarativo | ESC-P2 |
-| Exception Handling | Sí | L | Banda transversal | 0 stack traces expuestos |
-| Retry | Sí | M | Resilience4j, solo idempotentes, acotado al 5 % del tráfico | Riesgo si se extendiera a escrituras |
-| Ignore Faulty Behavior | **No** | L | — | No hay fuentes externas no confiables |
-| Graceful Degradation | **No — eliminada a propósito** | — | `validate` no tiene dependencia del tier de datos que degradar (ADR-08, supera a ADR-04) | La ausencia de esta táctica es la mejora, no una carencia |
-| Reconfiguration | **Sí** *(era "No" en v1.0)* | L | Swarm reprograma tareas de `backend` caídas; `repmgrd` promueve standbys de Postgres | ESC-D1, ESC-D7 |
-| Shadow | **No** | L | — | Fuera del alcance |
-| State Resync | Sí *(era "Parcial" en v1.0)* | L | Re-clonado (`pg_basebackup`) del nodo reincorporado tras vaciar su volumen | Ya no depende de una caché ad-hoc; es el mecanismo nativo de repmgr |
-| Escalating Restart | Parcial | M | Automatizado para caída de contenedor/proceso; la muerte de disco de un nodo no-manager sigue siendo manual (DA-7) | Documentado como límite explícito del MVP |
-| Nonstop Forwarding | **No** | L | — | Propio de elementos de red |
-| Removal from Service | Sí | L | `readiness` + *routing mesh* de Swarm | ADR-03 |
-| Transactions | Sí | L | `@Transactional(noRollbackFor = AppException.class)` en `login()` (ADR-07) | Integridad ante fallas parciales |
-| Predictive Model | **No** | **H** | — | Sin predicción de degradación: las fallas solo se detectan cuando ya ocurrieron |
-| Exception Prevention | Sí | L | Bean Validation, tipos fuertes; arranque bloqueado sin `JWT_SECRET` en `docker` (nuevo) | Reduce faltas latentes |
-| Increase Competence Set | Sí | L | Bloqueo por intentos (`LockoutPolicy` + ADR-07) | Estados adversos previstos |
+### 13.0 Criterio de priorización
 
-### 13.2 Desplegabilidad
+Cada táctica se califica en tres ejes, con escala **A**lto / **M**edio / **B**ajo:
 
-| Táctica | ¿Soportada? | Riesgo | Decisión y ubicación |
-|---|---|---|---|
-| Scale Rollouts | Sí | L | `update_config` de Swarm, declarativo (antes: orquestado a mano por un script) |
-| Rollback | Sí | L | `docker service rollback` |
-| Script Deployment Commands | Sí | L | Todo el despliegue está guionado (`deploy.sh`) |
-| Manage Service Interactions | Parcial | M | Graceful shutdown; sin versionado de API |
-| Package Dependencies | Sí | L | Imagen multietapa |
-| Feature Toggle | Sí | L | Variables de entorno |
-| Canary Testing | **No** | M | Requiere enrutamiento por porcentaje |
-| A/B Testing | **No** | L | Fuera del alcance |
-| Blue-Green | Parcial | L | Se optó por rolling declarativo; blue-green necesitaría duplicar el stack |
+| Eje | Qué mide |
+|---|---|
+| **Impacto** | Cuánto mueve la *medida de respuesta* del escenario que la táctica atiende. Una táctica que no cambia ningún número medido tiene impacto B por elegante que sea |
+| **Costo** | Esfuerzo de implementación **más** la complejidad permanente que agrega: piezas nuevas que operar, dependencias, código que mantener |
+| **Riesgo si se omite** | Qué tan expuesto queda el sistema sin ella |
 
-### 13.3 Riesgos altos detectados
+De ahí sale la prioridad:
+
+| Prioridad | Significado |
+|---|---|
+| **P1 — adoptada** | Impacto alto con costo asumible. Sostiene directamente un escenario con medida verificada |
+| **P2 — adoptada con límite** | Se implementa con alcance acotado a propósito, y el límite queda documentado en vez de escondido |
+| **P3 — descartada conscientemente** | Impacto bajo sobre *los escenarios de este sistema*, o costo desproporcionado frente a lo que aporta. Descartar no es olvidar: cada P3 lleva su razón |
+
+Una aclaración que evita malinterpretar la tabla: **P3 no significa "táctica mala"**.
+*Voting* es excelente en sistemas de control redundante y aquí no aplica porque no hay
+réplicas que calculen lo mismo. La prioridad es relativa a este sistema y a sus escenarios,
+no una calificación del catálogo.
+
+### 13.1 Disponibilidad (Cap. 4)
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| Ping/Echo | Sí | A | B | A | **P1** | `HEALTHCHECK` de Docker sobre `liveness` y `/healthz`, consumido por el *routing mesh* |
+| Monitor | Sí | A | B | A | **P1** | Micrometer + `/actuator/metrics`; contador `errors.<kind>` — base de toda medición |
+| Condition Monitoring | Sí | A | B | A | **P1** | `DataTierHealthIndicator`; `repmgrd` sobre el primario. Alimenta `readiness` y ESC-D7 |
+| Exception Detection | Sí | A | B | A | **P1** | `GlobalExceptionHandler` (§7.3). Ninguna excepción pasa inadvertida |
+| Exception Handling | Sí | A | B | A | **P1** | Banda transversal + `fallbackMethod`. 0 stack traces expuestos |
+| Exception Prevention | Sí | A | B | M | **P1** | Bean Validation, tipos fuertes; arranque bloqueado sin `JWT_SECRET` en `docker` |
+| Redundant Spare | Sí | A | M | A | **P1** | 2 réplicas de `web`, 3 de `backend`, 3 nodos de Postgres. Ningún tier sin redundancia |
+| Reconfiguration | Sí *(era "No" en v1.0)* | A | B | A | **P1** | Swarm reprograma tareas caídas; `repmgrd` promueve standbys. El costo es B porque lo aporta el orquestador |
+| Removal from Service | Sí | A | B | A | **P1** | `readiness` + *routing mesh* (ADR-03) |
+| Rollback | Sí | A | B | A | **P1** | `docker service rollback`, declarativo (ESC-P2) |
+| State Resync | Sí *(era "Parcial")* | A | M | A | **P1** | Re-clonado (`pg_basebackup`) tras vaciar el volumen. Mecanismo nativo de repmgr |
+| Transactions | Sí | A | B | A | **P1** | `@Transactional(noRollbackFor = AppException.class)` en `login()` (ADR-07) |
+| Timestamp | Sí | M | B | M | **P1** | `exp` del JWT; `expiresAt` del refresh token. Es lo que hace viable la sesión sin estado |
+| Sanity Checking | Sí | M | B | M | **P1** | `SELECT 1` con timeout corto |
+| Increase Competence Set | Sí | M | B | M | **P1** | `LockoutPolicy` + ADR-07: estados adversos previstos, no excepcionales |
+| Retry | Sí | M | B | M | **P2** | Resilience4j, **solo idempotentes**, acotado al 5 % del tráfico. Extenderlo a escrituras introduciría duplicados: el límite es la decisión |
+| Self-Test | Sí | M | B | M | **P2** | `SELECT 1` en `readiness`. Se solapa parcialmente con Sanity Checking; no se construyó un self-test más amplio |
+| Heartbeat | Sí | B | B | B | **P2** | `@Scheduled` con `NODE_ID`. Complementa a Ping/Echo, que ya cubre el caso principal |
+| Escalating Restart | Parcial | M | A | M | **P2** | Automatizado para caída de contenedor; la muerte del disco de un nodo no-manager sigue manual (DA-7). Resolverlo exige almacenamiento distribuido |
+| Predictive Model | **No** | M | A | **A** | **P3** | Exige series temporales y umbrales calibrados con histórico que no existe. **Es el riesgo R-1**, asumido a conciencia |
+| Voting | **No** | B | A | B | **P3** | Requiere réplicas que calculen lo mismo y comparen resultados. No aplica: las réplicas atienden peticiones distintas |
+| Ignore Faulty Behavior | **No** | B | B | B | **P3** | No hay fuentes externas no confiables que ignorar |
+| Shadow | **No** | B | A | B | **P3** | Exige duplicar tráfico a un entorno paralelo. Fuera del alcance |
+| Nonstop Forwarding | **No** | B | A | B | **P3** | Propia de elementos de red con plano de control y de datos separados |
+| Graceful Degradation | **No — eliminada a propósito** | — | — | — | **P3** | `validate` ya no tiene dependencia del tier de datos que degradar (ADR-08 supera a ADR-04). **La ausencia es la mejora, no una carencia**: no se contiene el daño de una falla, se elimina la falla |
+
+**Lectura de la tabla.** Las 15 P1 son las que sostienen los escenarios con medida
+verificada. Las cuatro P2 comparten un patrón: están implementadas *con un límite explícito*
+—Retry solo en idempotentes, Escalating Restart solo hasta la caída de contenedor— y ese
+límite es la decisión, no un descuido. Las seis P3 se reparten en dos grupos: cinco
+inaplicables al dominio y **una sola descartada por costo teniendo riesgo alto**
+(Predictive Model), que por eso mismo aparece como R-1 en §13.4.
+
+### 13.2 Desplegabilidad (Cap. 5)
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| Scale Rollouts | Sí | A | B | A | **P1** | `update_config` de Swarm, declarativo (antes: orquestado a mano por un script) |
+| Rollback | Sí | A | B | A | **P1** | `docker service rollback` |
+| Script Deployment Commands | Sí | A | B | A | **P1** | Todo el despliegue guionado (`deploy.sh`), incluidas las dos imágenes |
+| Package Dependencies | Sí | A | B | M | **P1** | Imagen multietapa; el tier de presentación no necesita build |
+| Feature Toggle | Sí | M | B | B | **P1** | Variables de entorno y `@ConditionalOnProperty` sobre `features.*` |
+| Manage Service Interactions | Parcial | M | M | M | **P2** | *Graceful shutdown* sí; **sin versionado de API**. Con un solo cliente el riesgo es acotado; dejaría de serlo con clientes externos |
+| Canary Testing | **No** | M | A | M | **P3** | Exige enrutamiento por porcentaje, que el *routing mesh* no ofrece. Requeriría un proxy con reglas de tráfico — la pieza que ADR-10 eliminó |
+| Blue-Green | Parcial | B | A | B | **P3** | Se optó por rolling declarativo; blue-green exigiría duplicar el stack entero, incluido el cluster de Postgres |
+| A/B Testing | **No** | B | A | B | **P3** | Mide comportamiento de usuarios, no despliegue. Fuera del alcance |
+
+### 13.3 Modificabilidad (Cap. 8)
+
+Este atributo es el objeto del Taller 2. El escenario que sostienen estas tácticas es:
+*agregar un atributo nuevo y su regla de validación a `Producto`*, con medida de respuesta
+de ≤2 módulos tocados, <3 horas y 0 defectos nuevos. Las decisiones detalladas, con sus
+alternativas descartadas, están en [`docs/DECISIONS.md`](../../docs/DECISIONS.md).
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| **Defer binding** | Sí | A | B | A | **P1** | **El núcleo del diseño.** Las reglas se enlazan al motor por inyección de dependencias al arrancar el contenedor, no al compilar (ADR-003); los toggles se resuelven leyendo configuración (ADR-005). Es lo que permite agregar una regla sin editar ningún archivo existente |
+| Increase semantic coherence | Sí | A | B | A | **P1** | *Vertical slice*: todo lo que cambia por la misma razón queda junto (ADR-001). Una regla = una clase (ADR-003). Cada tipo de validación en su capa (ADR-004) |
+| Encapsulate | Sí | A | B | A | **P1** | `product.api` es la única superficie pública del módulo; `ProductRuleEngine` la única del motor; `ProductMapper` impide que la entidad se exponga por HTTP (ADR-006) |
+| Restrict dependencies | Sí | A | B | A | **P1** | Dirección de dependencias hacia lo compartido, nunca hacia el módulo de features: `FieldViolation` vive en `dto` y no en `product` (ADR-007). El token dejó de depender del username mutable (ADR-002) |
+| Split module | Sí | A | B | M | **P1** | El módulo `product` es autocontenido y no lo toca el de usuarios (ADR-001); el motor de reglas está partido en una clase por regla |
+| Use an intermediary | Sí, **acotada** | M | M | M | **P2** | `ProductMapper` entre DTO y dominio, y `GlobalExceptionHandler` como único traductor excepción→HTTP. **Se rechazaron dos intermediarios más**: MapStruct (ADR-006) y convertir el mapper en bean, porque agregaban un salto sin ganar nada testeable |
+| Abstract common services | Parcial | M | M | B | **P2** | La interfaz `ProductRule` y el patrón Repositorio abstraen sus servicios. No se construyó una capa de abstracción más amplia: con dos entidades no habría a qué abstraer todavía |
+| Refactor | Puntual | M | M | B | **P2** | Aplicada donde hizo falta —mover `applyChangesFrom` del mapper al dominio, para que el campo nuevo y su editabilidad queden en el mismo archivo—, no como práctica planificada |
+
+**Lo descartado, y por qué.** Aquí el criterio de costo pesó más que en los otros atributos,
+porque casi toda táctica de modificabilidad se paga con una indirección permanente:
+
+| Descartado | Táctica que habría aportado | Razón |
+|---|---|---|
+| **MapStruct** | Use an intermediary | Ahorra un archivo en el ejercicio cronometrado (impacto B) a cambio de un *annotation processor* en el build y un mapeo que deja de verse en el repositorio (costo A) |
+| **Togglz / FF4J** | Defer binding en ejecución | Toggles en caliente (impacto B para este alcance) a cambio de dependencia, tabla nueva y una consola que asegurar (costo A) |
+| **Registro central de reglas** (enum o `Map`) | Encapsulate | **Impacto negativo**: agregar una regla obligaría a editar el registro, que es exactamente lo que la medida de respuesta penaliza |
+| **Consolidar el acceso a datos en un paquete único** | Increase semantic coherence | **Impacto negativo sobre el escenario**: sacar `ProductRepository` del *slice* haría que agregar un atributo tocara un módulo más |
+
+Los dos últimos son el caso interesante: son tácticas del catálogo que, aplicadas a este
+sistema, **empeorarían** la medida de respuesta. Es la mejor evidencia de que la
+priorización no puede hacerse leyendo el catálogo, sino contra el escenario concreto.
+
+### 13.4 Riesgos altos detectados
 
 **R-1 (Alto) — Ausencia de Predictive Model.** Sin cambios respecto a v1.0: el sistema
 solo reacciona a fallas consumadas, no hay detección de tendencias.
@@ -1165,7 +1562,7 @@ deuda deliberada y registrada es gestionable; la no documentada es la peligrosa.
 | DA-3 | Caché de sesiones local por réplica | **Eliminada** (ADR-08 supera a ADR-04) | — | — |
 | DA-4 | Sin versionado de la API | Vigente | Alcance del taller | Bajo si se hace ahora, alto después |
 | DA-5 | Escalating Restart manual | **Reducida** (ADR-09, ADR-11): automática para caída de proceso, manual solo para pérdida de disco | Sin StatefulSets en Swarm | Ver DA-7 |
-| DA-6 | Tier de datos no es servicio propio | Vigente (ADR-02) | Alcance del taller | Medio, acotado por Repository |
+| DA-6 | El tier de datos es un módulo en proceso, no un servicio desplegado aparte | Vigente (ADR-02) | Ponerlo en serie obligaría a replicarlo y a rehacer el modelo de la §11 | Bajo: la frontera es la interfaz de repositorio, así que promoverlo a servicio no toca la capa de negocio |
 | DA-7 | **Nueva.** Volúmenes de Postgres locales al nodo Swarm: la muerte de un nodo no-manager pierde su disco | Documentada, no resuelta | RE-6, alcance de MVP; Swarm no tiene volúmenes distribuidos nativos | Alto: requiere NFS/EBS/CSI o migrar a Kubernetes con StorageClass |
 | DA-8 | **Nueva.** Split-brain posible si se reincorpora un nodo de Postgres sin seguir el procedimiento de vaciado de volumen | Mitigada en script, no en infraestructura | Bitnami reutiliza el `PGDATA` existente sin verificar el estado del cluster | Medio: un *sidecar* o *init container* que verifique el rol antes de arrancar |
 
