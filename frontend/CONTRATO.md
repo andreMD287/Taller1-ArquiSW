@@ -13,7 +13,7 @@ corresponde a cada caso.
 
 | Marca | Significado |
 |---|---|
-| ✅ **VERIFICADO** | Leído directamente del código del backend en el commit `291b2a1`. Las fuentes se citan en cada sección. Si el código cambia y este documento no, **el documento está mal**. |
+| ✅ **VERIFICADO** | Leído directamente del código del backend en el commit `cce0957` (merge de `origin/main` en `thomas`). Las fuentes se citan en cada sección. Si el código cambia y este documento no, **el documento está mal**. |
 | 🟡 **PROPUESTO** | **No existe en el código.** Es una petición del frontend, pendiente de confirmación de Rol 1. Nada de esto puede darse por implementado. |
 | ⚠️ **BLOQUEANTE** | Verificado en el código, y hoy impide que el frontend funcione. Requiere acción de otro rol. |
 
@@ -22,8 +22,9 @@ corresponde a cada caso.
 `controller/AuthController.java`, `controller/DiagnosticsController.java`,
 `dto/`, `exception/`, `config/SecurityConfig.java`, `config/CorsConfig.java`,
 `security/RequestIdFilter.java`, `application.yml`,
-`db/migration/V3__users_roles_products.sql`, y los tests
-`ProductControllerTest` / `ErrorContractTest`.
+`db/migration/V3__users_roles_products.sql`, `repository/UserRepository.java`,
+`service/TokenService.java`, `service/AuthService.java`, y los tests
+`ProductControllerTest`, `ErrorContractTest`, `TokenServiceTest` y `AuthServiceTest`.
 
 **Verificación en ejecución.** Las respuestas marcadas *(observado)* se comprobaron
 levantando el backend en local con el perfil `test` (H2 en memoria, sin Docker) el
@@ -250,8 +251,9 @@ Validación estructural (`RegisterRequest`), que el frontend replica antes de en
 
 **`201 Created`** → `{ "username": "maria123" }`
 
-El usuario nace con rol `USER` y `active = true` (`User`, `V3`). **La respuesta no
-incluye el rol** — ver §6.3.
+El usuario nace con rol `USER` y `active = true` (`User`, `V3`). **La respuesta de
+`register` no incluye el rol**; el rol sí viaja, firmado, dentro del `accessToken`
+que devuelve `/login` — ver §3.2 y §6.3.
 
 Errores: `400 validation_error`, `409 user_already_exists`, `503 data_unavailable`.
 
@@ -286,14 +288,49 @@ los usa para **renovar antes de que expire**, en vez de esperar a un `401`.
 | `accessToken` | JWT firmado (HS256), se valida en memoria | 15 min por defecto (`JWT_TTL_SECONDS`) |
 | `refreshToken` | opaco, persistido, **revocable** | 7 días |
 
-**Sobre el contenido del JWT** (`TokenService`): el `subject` es el **ID numérico**
-del usuario y el `username` viaja como *claim* aparte. El frontend **no decodifica
-el JWT**: lo trata como una cadena opaca y toma el `username` del cuerpo de la
-respuesta. Decodificarlo acoplaría el frontend al formato interno del token, que ya
-cambió una vez (ADR-002).
+**Contenido del JWT** (`TokenService.buildAccessToken`, firmado con HS256):
+
+| *Claim* | Contenido |
+|---|---|
+| `sub` | **ID numérico e inmutable** del usuario (ADR-002) |
+| `username` | nombre de usuario vigente al emitir el token; es mutable |
+| `role` | **`ADMIN` o `USER`** |
+| `jti`, `iss`, `iat`, `exp` | identificador del token, emisor, emisión y expiración |
+
+**El `role` es un *claim* firmado y está presente desde el merge de `origin/main`.**
+No es opcional para el backend: `validateAccessToken` **rechaza** con
+`401 invalid_session` un token sin `role` o con un valor que no sea `ADMIN` ni `USER`
+(pruebas `validateAccessTokenRechazaJwtSinRole` y
+`validateAccessTokenRechazaJwtConRoleInvalido`).
+
+**Lo que el frontend puede y no puede hacer con eso:**
+
+- `TokenResponse` —el cuerpo de `/login` y `/refresh`— **todavía no tiene una
+  propiedad JSON `role`**. El rol no llega como campo de la respuesta.
+- Mientras eso siga así, el frontend **puede decodificar localmente el *payload* del
+  access token** para leer `role` y adaptar la presentación (mostrar u ocultar los
+  botones de crear, editar y borrar).
+- **Decodificar el *payload* no es validar el token.** No comprueba la firma, no
+  concede permiso alguno y no debe usarse como frontera de seguridad: cualquiera
+  puede fabricar un JSON con `"role":"ADMIN"`, y el backend lo rechazaría igual.
+  **La autorización real es responsabilidad exclusiva del backend.**
+- Solo se aceptan como rol de UI los valores exactos `ADMIN` y `USER`. Ante un token
+  mal formado, sin el *claim* o con cualquier otro valor, el frontend trata el rol
+  como **desconocido (`null`)** y elige la presentación más restrictiva.
+- El `username` que se muestra se sigue tomando del **cuerpo de la respuesta**, no
+  del token.
 
 Errores: `401 invalid_credentials`, `423 account_locked`, `400 validation_error`,
 `503 data_unavailable`.
+
+⚠️ **Un usuario desactivado no puede iniciar sesión.** `AuthService.login()` consulta
+`findByUsernameAndActiveTrue`, así que un usuario con `active = false` es tratado
+exactamente igual que uno inexistente: **`401 invalid_credentials`**, sin ninguna
+señal que permita distinguir los dos casos (prueba
+`loginConUsuarioInactivoEsRechazadoComoCredencialesInvalidas`). Es deliberado —no
+revelar qué cuentas existen— y tiene una consecuencia para la UI: **el frontend no
+puede decir "tu cuenta fue desactivada"**, porque el backend no se lo dice y
+**no debe inventar un código como `user_inactive`** que la API no entrega.
 
 El bloqueo se activa a los **5 intentos fallidos** y dura **60 segundos**
 (`app.lockout` en `application.yml`; los valores reales se pueden consultar en
@@ -338,7 +375,10 @@ datos (ADR-08 de Taller 1). El frontend puede usarlo para restaurar la sesión a
 recargar la página, con la garantía de que funciona aunque el tier de datos esté
 caído.
 
-**No devuelve el rol ni el ID del usuario** — ver §6.3.
+**`ValidateResponse` contiene únicamente `username` y `expiresAt`**: no devuelve el
+rol ni el ID del usuario, aunque el token que se le entrega sí los lleva como
+*claims* (§3.2). Para conocer el rol, el frontend decodifica el *payload* del access
+token que ya tiene; no necesita esta llamada — ver §6.3.
 
 ### 3.4 `POST /api/auth/refresh`
 
@@ -357,8 +397,25 @@ Consecuencia operativa: **dos renovaciones concurrentes con el mismo refresh tok
 fallan**, porque la primera lo consume. `src/platform/session` debe serializar la
 renovación —una sola en vuelo, las demás peticiones esperan a que termine—.
 
-Errores: `401 invalid_session` (inexistente o expirado), `400 validation_error`,
-`503 data_unavailable`.
+⚠️ **Cada `/refresh` puede traer un rol distinto.** `TokenService.refresh` no se
+limita a rotar el token: consulta el usuario con `findByIdAndActiveTrue` y emite el
+access token nuevo con el **`username` y el `role` vigentes en ese momento** (prueba
+`refreshUsaUsernameYRoleActualesDelUsuario`). Un cambio de rol hecho por un `ADMIN`
+se refleja en la UI en la siguiente renovación, sin volver a pedir credenciales. Por
+eso el frontend debe **recalcular el rol después de guardar el par nuevo**, no
+conservar el que leyó al iniciar sesión.
+
+⚠️ **Un usuario desactivado no puede renovar.** Si la cuenta pasó a `active = false`
+después de haber iniciado sesión, `findByIdAndActiveTrue` no la encuentra y el
+refresh responde **`401 invalid_session`** (prueba
+`refreshRechazaUsuarioInactivoONoEncontrado`). Es indistinguible de un refresh token
+expirado o ya usado, y también aquí **el frontend no debe inventar un código propio**.
+La reacción es la misma en todos los casos: **limpiar la sesión local y volver al
+login**. El access token que ya tenga en memoria seguirá siendo criptográficamente
+válido hasta que expire (≤ 15 min); es la ventana de revocación aceptada en ADR-08.
+
+Errores: `401 invalid_session` (refresh token inexistente, expirado o ya usado, **o
+usuario desactivado**), `400 validation_error`, `503 data_unavailable`.
 
 ### 3.5 `POST /api/auth/logout`
 
@@ -686,11 +743,17 @@ interno de la política de bloqueo, no del recurso.
    obsoleto en el mismo momento. ¿Se espera que el frontend fuerce una renovación de
    token tras el cambio, o el backend devuelve el usuario actualizado?
 
-4. **Soft delete y login.** Está anotado en `DECISIONS.md` que hoy
-   `AuthService.login()` usa `findByUsername()`, **que no filtra por `active`**: un
-   usuario eliminado podría seguir iniciando sesión. No es una petición del frontend,
-   pero sí determina si la pantalla de usuarios "elimina" de verdad. Se deja
-   registrado aquí porque afecta lo que la UI puede prometer.
+4. ~~**Soft delete y login.**~~ **RESUELTO** en el merge de `origin/main`. Lo que
+   estaba anotado en `DECISIONS.md` —que `AuthService.login()` usaba
+   `findByUsername()` sin filtrar por `active`, y por tanto un usuario eliminado
+   podría seguir iniciando sesión— **ya no es cierto**: `login()` usa
+   `findByUsernameAndActiveTrue` y `refresh` usa `findByIdAndActiveTrue` (§3.2, §3.4).
+   La pantalla de usuarios sí "elimina" de verdad: la cuenta desactivada no puede
+   iniciar sesión ni renovar. Queda una consecuencia para la UI, no un bloqueo: el
+   rechazo es indistinguible de unas credenciales incorrectas o de una sesión
+   vencida, así que **no se puede mostrar un mensaje específico de "cuenta
+   desactivada"** salvo que Rol 1 decida entregar un `code` propio, cosa que hoy no
+   hace y que tampoco es evidente que convenga (revelaría qué cuentas existen).
 
 ### 6.2 Restaurar un producto dado de baja
 
@@ -735,38 +798,46 @@ Errores propuestos: `404 product_not_found` si el `id` no existe **o ya está ac
   como **opcional y de segunda prioridad**: sin él, `restore` ya cubre el caso de
   deshacer inmediato, que es el que motiva la petición.
 
-### 6.3 Exponer el rol del usuario autenticado
+### 6.3 Exponer el rol en el cuerpo de las respuestas de `/api/auth/**`
 
 **Esta propuesta permite que la UI adapte la presentación según el rol.**
 
-Hoy **ninguna respuesta del backend le dice al frontend qué rol tiene el usuario**:
-`/login` devuelve `username` y los tokens; `/validate` devuelve `username` y
-`expiresAt`; el JWT lleva `sub` (ID) y `username`, y **ningún *claim* de rol**. Pero
-ADR-011 hace que `POST`/`PUT`/`DELETE` de productos sean exclusivos de `ADMIN`.
+**Ya no es bloqueante.** El merge de `origin/main` agregó un *claim* `role` firmado al
+access token (§3.2), así que el frontend **ya puede** saber si el usuario es `ADMIN` o
+`USER` decodificando el *payload* del token que tiene, y ADR-011 —`POST`/`PUT`/`DELETE`
+de productos exclusivos de `ADMIN`— deja de obligar a elegir entre mostrarle a todo el
+mundo botones que darán `403` o esconderlos también al administrador.
 
-Sin el rol, al frontend solo le quedan dos opciones, ambas malas: mostrarle a todo
-el mundo los botones de crear, editar y borrar y dejar que descubran por un `403` que
-no pueden usarlos; o esconderlos siempre y dejar sin funcionalidad al `ADMIN`.
+**Lo que sigue faltando, y por qué se mantiene la petición:**
 
-**Propuesta, en orden de preferencia:**
+- `TokenResponse` (`/login`, `/refresh`) **no tiene una propiedad `role`**.
+- `ValidateResponse` (`/validate`) sigue siendo solo `username` y `expiresAt`.
 
-1. Agregar `"role": "ADMIN"` al cuerpo de **`/api/auth/login`** y de
-   **`/api/auth/refresh`** (`TokenResponse`), y a **`/api/auth/validate`**
-   (`ValidateResponse`). Es aditivo: ningún consumidor existente se rompe, igual que
-   el `violations` de ADR-007.
-2. Alternativa: un *claim* `role` dentro del JWT. Funciona, pero **obligaría al
-   frontend a decodificar el token**, que es justo lo que §3.2 evita para no acoplarse
-   a un formato que ya cambió una vez (ADR-002). Se prefiere la opción 1.
+Mientras eso siga así, leer el rol obliga al frontend a **depender del formato interno
+del token** —partirlo por puntos, decodificar base64url, buscar un *claim*—. Ese
+formato ya cambió una vez (ADR-002 movió el `subject` de `username` a ID) y volverá a
+cambiar sin que el contrato HTTP lo refleje. Es acoplamiento real, aunque hoy no
+impida trabajar.
 
-**En los dos casos, el rol que llega al frontend es solo para decidir qué se
-muestra.** La autorización real la sigue haciendo el backend, y el frontend maneja el
-`403` como caso posible de todas formas: un rol en el cliente es una comodidad de UI,
-nunca un control de seguridad.
+**Propuesta:** agregar `"role": "ADMIN"` al cuerpo de **`/api/auth/login`** y
+**`/api/auth/refresh`** (`TokenResponse`), y a **`/api/auth/validate`**
+(`ValidateResponse`). Es aditivo —ningún consumidor existente se rompe, igual que el
+`violations` de ADR-007— y permitiría al frontend dejar de decodificar el token.
+
+**Prioridad: mejora del contrato, no impedimento.** Se registra para que Rol 1 decida
+con la información completa; el frontend no queda esperándola.
+
+**En cualquiera de los dos caminos, el rol que llega al cliente es solo para decidir
+qué se muestra.** La autorización real la sigue haciendo el backend, el frontend
+maneja el `403` como caso posible de todas formas (§1.5), y un rol en el cliente
+—venga de un campo JSON o de un *claim* decodificado— es **una comodidad de
+presentación, nunca un control de seguridad**.
 
 > Nota relacionada: `ValidateResponse` tampoco expone el `id` del usuario, aunque el
-> JWT ya lo lleva como `subject` desde ADR-002. Si la pantalla de usuarios necesita
-> identificar "yo" en la lista —para no ofrecer eliminarse a sí mismo—, hará falta
-> también. Se menciona junto al rol porque afecta a las mismas respuestas de
+> JWT lo lleva como `subject` desde ADR-002. Si la pantalla de usuarios necesita
+> identificar "yo" en la lista —para no ofrecer eliminarse a sí mismo—, aplica lo
+> mismo: hoy se puede leer del token, y exponerlo en el cuerpo reduciría el
+> acoplamiento. Se menciona junto al rol porque afecta a las mismas respuestas de
 > `/api/auth/**`.
 
 ### 6.4 Cabecera `Idempotency-Key` en mutaciones
@@ -821,7 +892,8 @@ mensaje—. Este documento no estima el costo de ninguna de las dos.
 | 3 | Contrato de productos (`/api/products`) | ✅ Verificado en código | — |
 | 4 | Acceso real a `/api/products` | ⚠️ **Bloqueado**: falta el filtro JWT y `@EnableMethodSecurity` (ADR-011) | Rol 2 |
 | 5 | Cabecera `Authorization: Bearer` | 🟡 Propuesto — ningún endpoint la lee todavía | Rol 2 |
-| 6 | Rol del usuario en la respuesta | 🟡 Propuesto (§6.3) | Rol 1 |
+| 6 | Rol del usuario | ✅ Disponible como *claim* firmado en el access token (§3.2). 🟡 Sigue propuesto exponerlo en el cuerpo de las respuestas (§6.3), como mejora no bloqueante | Rol 1 |
+| 6b | Usuarios desactivados no inician sesión ni renuevan | ✅ Verificado tras el merge (§3.2, §3.4). Cierra la pregunta 4 de §6.1 | — |
 | 7 | `POST /api/products/{id}/restore` | 🟡 Propuesto (§6.2) | Rol 1 |
 | 8 | CRUD de usuarios | 🟡 Propuesto (§6.1); ya registrado como pendiente por Rol 1 | Rol 1 / Rol 2 |
 | 9 | Cabecera `Idempotency-Key` | 🟡 Propuesto (§6.4) — no honrado por el backend aún | Rol 1 |
