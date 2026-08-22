@@ -1,0 +1,26 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:55432/authdb_it
+    driver-class-name: org.postgresql.Driver
+    username: auth
+    password: auth
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+  flyway:
+    enabled: true
+
+app:
+  lockout:
+    max-attempts: 5
+    lockout-seconds: 60
+  jwt:
+    secret: test-secret-key-for-jwt-signing-only-not-for-prod-use
+    access-ttl-seconds: 900
+    refresh-ttl-seconds: 604800
+    purge-interval-ms: 3600000
+
+features:
+  new-dashboard: false
