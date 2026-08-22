@@ -36,10 +36,18 @@
  *       no es seguro y la operación se aborta ("Timeout / Unsafe State
  *       Detection"). Sirve para NO QUEDARSE COLGADO.
  *
- * Igualarlos censuraría la medición: toda petición que excediera el presupuesto
- * sería abortada antes de poder registrarse como excedida, y el contador de
- * incumplimientos quedaría permanentemente en cero mientras la experiencia real
- * empeora. La ventana 2000-5000 ms es justamente la que hay que poder observar.
+ * Igualarlos NO haría desaparecer la muestra: un timeout sí deja muestra, con la
+ * latencia observada hasta el aborto, entra en los percentiles de red, y
+ * `timeout` y `budgetExceeded` se calculan y cuentan por separado.
+ *
+ * Lo que se perdería es el CONTENIDO de esa muestra: la latencia completa que la
+ * operación habría tenido, su status y su `kind`, y la distinción entre una
+ * respuesta lenta que habría terminado bien y una espera que nunca habría
+ * terminado. La distribución quedaría censurada cerca del timeout.
+ *
+ * La ventana 2000-5000 ms es justamente la que permite observar respuestas
+ * COMPLETAS que incumplen el presupuesto, antes de aplicar el límite duro.
+ * Detalle completo en docs/DECISIONS-FRONTEND.md, ADR-F03.
  *
  * Este archivo es el ÚNICO lugar del frontend donde vive la dirección del
  * backend. Ningún módulo de src/ debe declararla ni reconstruirla.

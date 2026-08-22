@@ -294,3 +294,466 @@ existiendo en las carpetas pero ya no en el código, que es donde importa.
   activables por *toggle* (ADR-005) y llegan como `422 violations[]`; copiarlas aquí
   crearía una segunda fuente de verdad capaz de rechazar operaciones que el servidor
   acepta. Está detallado en §4.1 de `frontend/CONTRATO.md`.
+
+---
+
+## ADR-F02 — Cliente HTTP único y sesión por inversión de dependencia
+
+**Fecha:** 2026-08-21
+**Estado:** Aceptada
+
+### Contexto
+
+El tier de presentación nació con un único archivo, [`frontend/app.js`](../frontend/app.js),
+que resuelve la pantalla de login haciendo todo por su cuenta dentro de un
+*listener* de `submit`:
+
+- llama a `fetch()` directamente (`app.js:14`);
+- conoce una URL absoluta del backend escrita a mano
+  (`"http://localhost:8080/api/auth/login"`, `app.js:15`);
+- serializa el cuerpo y parsea la respuesta él mismo;
+- guarda los tokens en `localStorage` (`app.js:34`, `app.js:38`);
+- decide el texto que se muestra al usuario.
+
+Lo que no hace es todo lo demás: no aplica timeout, no genera ni propaga un
+identificador de correlación, no mide nada, no traduce los errores del backend a
+un modelo común y no sabe renovar una sesión. Con una pantalla eso se sostiene;
+con un CRUD sobre varios recursos, cada pantalla nueva repetiría las mismas cinco
+responsabilidades y ninguna de las políticas transversales, y una petición sin
+timeout o sin medir sería indistinguible de una correcta hasta que fallara en
+producción.
+
+**Ese archivo legado sigue existiendo tal cual.** `frontend/index.html:46` continúa
+cargándolo con `<script src="app.js">`, y no ha sido migrado. Este ADR **no**
+afirma lo contrario. La invariante que sí está en vigor hoy se enuncia sobre el
+código modular:
+
+> Dentro de `frontend/src/**`, solamente `src/platform/http.js` puede llamar a
+> `fetch()`.
+
+`frontend/app.js` queda temporalmente fuera de esa invariante y entrará en ella
+cuando se reemplace, en el commit de arranque de la aplicación.
+
+### Decisión
+
+Todo el HTTP del código modular pasa por **`frontend/src/platform/http.js`**, que
+concentra:
+
+| Responsabilidad | Dónde |
+|---|---|
+| Resolución de la URL a partir de `frontend/config.js` | `resolveUrl(path)`, importado en `http.js:41` |
+| Construcción determinista del *query string* | `buildQuery()` |
+| Serialización del cuerpo | antes de `fetch`, `http.js:355-370` |
+| Cabeceras `Accept` y `Content-Type` | `buildHeaders()` |
+| Generación y propagación de `X-Request-Id` | `newRequestId()` + `buildHeaders()` |
+| `Authorization: Bearer` | `buildHeaders()`, a partir del proveedor inyectado |
+| Timeout | `AbortController` + `setTimeout(config.requestTimeoutMs)` |
+| Cancelación externa (`signal`) | combinada con el timeout interno |
+| Lectura del cuerpo **una sola vez** | `readBody()`, siempre con `.text()` |
+| Tolerancia a cuerpo vacío, no-JSON y `204` | `readBody()` |
+| Traducción de fallos a `HttpError` | delegada en `errors.js` |
+| Medición de cada intento | `metrics.record()` en los dos caminos |
+| Reintento único tras una renovación exitosa | `http.js:513-525` |
+
+Las responsabilidades complementarias viven fuera y son de un solo dueño:
+
+- **`errors.js`** traduce respuestas y fallos —`ErrorResponse` JSON, cuerpo de
+  texto, `403` vacío, timeout, red, fallo local— a un modelo interno uniforme con
+  `code`, `kind`, `category`, `requestId` y `violations`.
+- **`metrics.js`** registra una muestra por intento y las resume (`report()`).
+- **`session.js`** administra tokens, expiración, persistencia, rol y renovación.
+- Los **errores locales de serialización** se distinguen de los de red: se
+  detectan antes de tocar la red (`http.js:355-370`), producen un `HttpError` de
+  categoría `client` vía `fromClientFailure()` y **no generan una muestra**,
+  porque no hubo ninguna petición que medir. Contarlos como red haría que un
+  defecto del propio frontend apareciera como indisponibilidad del backend.
+
+### Inversión de dependencia
+
+La dirección permitida es una sola:
+
+```text
+session.js → http.js
+```
+
+y nunca
+
+```text
+http.js → session.js
+```
+
+`session.js` importa el API público de `http.js` (`session.js:36`). `http.js`
+importa exactamente tres módulos —`config.js`, `metrics.js` y `errors.js`
+(`http.js:41-43`)— y ninguno es la sesión.
+
+La comunicación en sentido contrario entra por `configureAuthProvider()`, con
+tres capacidades **opcionales**:
+
+```text
+getToken()    -> string | null
+refresh()     -> Promise
+notify(event) -> void
+```
+
+- Sin `getToken()`, la petición sale **sin `Authorization`**.
+- Sin `refresh()`, un `401 invalid_session` se **propaga sin reintento**.
+- Sin `notify()`, un `403` se **propaga sin evento**.
+- `http.js` **no sabe quién** las implementa: solo declara su forma.
+- `crud/**` y `resources/**` no reciben ni pasan tokens: no saben que existen.
+- El proveedor se instala desde las operaciones de sesión, no al importar el
+  módulo, de modo que no hay ciclo de imports ni efectos de carga.
+
+### Refresh y reintento
+
+- **Login, refresh y logout** se invocan con `{auth:false, retryAuth:false}`: no
+  llevan `Authorization` —el backend recibe los tokens en el cuerpo— y un fallo de
+  autenticación en el propio refresh no puede disparar otro refresh.
+- Las **solicitudes normales** usan `retryAuth:true` (valor por defecto,
+  `http.js:336`).
+- Ante `401 invalid_session`, `http.js` pide una renovación al proveedor; si
+  funciona, **reintenta la petición una sola vez**, y el reintento lleva
+  `retryAuth:false` para que un segundo `401` no vuelva a entrar en el ciclo.
+- Si la renovación **falla**, se propaga **el error real del refresh** —incluido su
+  `requestId`—, no el `401` que lo disparó. Quien depure el incidente necesita el
+  identificador de la llamada que de verdad falló.
+- El intento original y el reintento dejan **muestras independientes** en
+  `metrics.js`: son dos peticiones reales y ocultar una falsearía la medición.
+- `http.js` **no tiene** `refreshPromise`, ni cola, ni contador de renovaciones.
+  La única promesa compartida vive en `session.js` (`session.js:175`, con la
+  identidad estricta en `session.js:698-719`).
+- Esa misma promesa coordina las cuatro fuentes de renovación: **proactiva** (por
+  temporizador), **reactiva** (tras un `401`), **manual** y la que inicia
+  `restore()`. El refresh token es de un solo uso y rota al canjearse, así que dos
+  canjes simultáneos harían que el segundo recibiera `401` y cerrara una sesión
+  válida.
+
+**Protección por generaciones.** Una respuesta que llega tarde no puede escribir
+sobre una sesión posterior: cada operación que establece o destruye una sesión
+—`login()`, `logout()`, `restore()`, `clear()`— reclama una identidad al empezar,
+y toda operación asíncrona comprueba la suya antes de aplicar. `login()` usa dos
+identidades, una de inicio y otra de confirmación: la primera ordena dos login
+concurrentes y la segunda expulsa a los refresh de la sesión anterior que
+arrancaron mientras el login viajaba. El `finally` de una renovación antigua solo
+limpia la referencia compartida si sigue siendo la suya, de modo que no puede
+borrar la promesa de una renovación nueva.
+
+### Alternativas descartadas
+
+1. **`fetch()` en cada pantalla.** Es lo que hace hoy `app.js` y es el punto de
+   partida del problema: cada pantalla repetiría URL, cabeceras y parseo, y —lo
+   grave— ninguna aplicaría timeout, correlación ni medición. Las políticas
+   transversales no se aplican por convención, se aplican porque solo hay un
+   camino.
+
+2. **Importar `session.js` desde `http.js`.** Es la solución evidente y crea un
+   ciclo: la sesión necesita hablar HTTP para hacer login y refresh, y el
+   transporte necesita un token. Un ciclo de imports en módulos ES es además una
+   trampa de inicialización: el orden de evaluación decide qué mitad ve a la otra
+   a medio construir.
+
+3. **Pasar el token manualmente desde cada llamada CRUD.** Rompe la encapsulación
+   en la dirección peor: obligaría a `crud/**` y a `resources/**` a conocer la
+   autenticación, cuando su razón de existir es no conocer nada del dominio
+   técnico. Y bastaría una llamada que olvidara el token para producir un `401`
+   inexplicable.
+
+4. **Mantener una cola de refresh en HTTP *y* en sesión.** Parece defensa en
+   profundidad y es lo contrario: dos coordinadores producen dos canjes del mismo
+   refresh token de un solo uso, y el segundo recibe `401` y cierra una sesión que
+   estaba viva. La coordinación tiene que tener **un solo dueño**.
+
+5. **Parsear siempre con `response.json()`.** Un `Response` solo se puede consumir
+   una vez, y `.json()` lanza sobre un cuerpo vacío o no-JSON. Con el `403` vacío
+   de la cadena de seguridad —sin `Content-Type` y sin cuerpo— eso convertiría un
+   rechazo previsto en un error de *parsing* del frontend. Leyendo `.text()` una
+   vez y parseando aparte, el mismo camino sirve para JSON, texto plano, cuerpo
+   vacío y `204`.
+
+6. **Guardar el access token y el refresh token en claves separadas.** Dos
+   escrituras pueden intercalarse: una interrupción entre ambas deja un access
+   token nuevo junto a un refresh token viejo, y la siguiente renovación falla con
+   `401` sobre una sesión que era válida. Se guarda **un único registro JSON
+   versionado**, sustituido con un solo `setItem`.
+
+7. **Permitir más de un reintento automático tras un `401`.** Si la renovación
+   funcionó y la petición vuelve a dar `401`, el problema no es la sesión, y
+   reintentar en bucle solo multiplica la carga sobre un backend que ya está
+   rechazando. Un intento, y el error se propaga.
+
+### Tácticas aplicadas
+
+| Táctica | Dónde se aplica |
+|---|---|
+| **Encapsulate** (Cap. 7) | El transporte —URL, cabeceras, serialización, parseo, traducción de errores— queda detrás de `get/post/put/del`, y la forma en que el backend reporta un fallo queda detrás del modelo de `errors.js`. Un cambio en el contrato de transporte se absorbe en un módulo. |
+| **Use an Intermediary** (Cap. 7) | `http.js` es el intermediario entre los consumidores y el backend. Nadie más habla con la red, y por eso las políticas transversales se pueden garantizar en vez de recordar. |
+| **Restrict Dependencies** (Cap. 8) | `http.js` no importa `session.js`, y `crud/**` y `resources/**` no conocen la autenticación. Las dependencias permitidas se limitan deliberadamente, no por convención. |
+| **Abstract Common Services** (Cap. 8) | Timeout, correlación, traducción de errores, medición y renovación existen **una sola vez**, no una por pantalla. |
+| **Defer Binding** (Cap. 8) | El proveedor de autenticación se inyecta en tiempo de ejecución mediante `configureAuthProvider()`, declarado por capacidades y no por identidad del módulo. |
+
+La justificación de *seguridad* del timeout —por qué abortar una espera es
+obligatorio, no una comodidad— **no pertenece a este ADR**: está en ADR-F03.
+
+### Costo aceptado
+
+- **Más indirección.** Seguir una petición exige abrir el módulo que la pide,
+  `http.js`, `errors.js` y a veces `session.js`. Para una pantalla es más trabajo
+  que un `fetch()` suelto; la inversión se recupera con la segunda.
+- **Un punto central con alcance transversal.** Un defecto en `http.js` afecta a
+  toda la aplicación a la vez. Es la contrapartida inevitable de que solo haya un
+  camino, y es la razón de que el módulo esté cubierto por pruebas exhaustivas.
+- **Un contrato de capacidades entre transporte y sesión.** `getToken`, `refresh`
+  y `notify` son una interfaz implícita que hay que mantener coherente en los dos
+  lados sin que ninguno importe al otro.
+- **Pruebas del intermediario obligatorias.** Sin ellas, el punto único deja de ser
+  una garantía y pasa a ser un riesgo concentrado.
+- **Complejidad para coordinar renovación y carreras.** Promesa compartida,
+  identidad estricta y generaciones son mecanismos que no harían falta si cada
+  pantalla se las arreglara sola —y que son justamente lo que impide que dos
+  canjes simultáneos cierren una sesión válida.
+- **Persistencia en `localStorage`.** Con `allowCredentials=false` en el backend no
+  hay cookies, así que el token vive en el cliente y queda expuesto a cualquier
+  script que se ejecute en el origen. Es la superficie de riesgo que acepta la
+  arquitectura actual, no una elección indiferente.
+- **`frontend/app.js` sigue fuera de la invariante** hasta que se reemplace. Es
+  deuda declarada, con fecha de vencimiento en el commit de arranque.
+
+---
+
+## ADR-F03 — Timeout distinto del presupuesto de latencia y degradación controlada
+
+**Fecha:** 2026-08-21
+**Estado:** Aceptada
+
+### Contexto
+
+`frontend/config.js` declara dos valores distintos, y su diferencia es una
+decisión, no un descuido (`config.js:106-107`):
+
+```text
+requestTimeoutMs: 5000
+latencyBudgetMs:  2000
+```
+
+No miden lo mismo:
+
+- **2000 ms es el presupuesto de calidad**: el umbral a partir del cual una
+  respuesta se considera un incumplimiento del objetivo de latencia. No aborta
+  nada; se **mide**.
+- **5000 ms es el límite de espera**: el punto en que seguir esperando deja de ser
+  seguro y la operación se **aborta**.
+
+De ahí que una respuesta de **4000 ms** incumpla el presupuesto y, aun así, sea una
+**respuesta completa y observable**:
+
+- se conoce su `status`;
+- se conoce su `kind`;
+- se sabe si fue éxito o error;
+- se mide su latencia completa, la real;
+- se marca `budgetExceeded: true`;
+- y **no se confunde con un fallo de transporte**.
+
+**Qué se pierde si los dos valores fueran 2000 ms.** Una operación que habría
+respondido a los 2500, 3000 o 4000 ms sería abortada alrededor de los 2000 ms. Esa
+operación **NO desaparece de las métricas** —conviene decirlo con precisión, porque
+es fácil suponer lo contrario—: `http.js` registra su muestra en el camino de
+fallo de transporte, con `timeout: true` y con `budgetExceeded` calculado sobre la
+latencia observada; `metrics.getNetworkSamples()` la incluye, `latencyStats()` la
+mete en p50, p95 y max, y `report()` cuenta los timeouts y los incumplimientos por
+separado. El contador de incumplimientos no quedaría en cero y los percentiles no
+se calcularían solo sobre lo que llegó a tiempo.
+
+Lo que se pierde no es la muestra, sino **su contenido**:
+
+1. **La latencia deja de ser la real y pasa a ser la del corte.** El intento entra
+   en los percentiles con la latencia observada hasta el aborto —unos 2000 ms—, no
+   con la que habría tenido. Una operación de 2100 ms y otra de 4900 ms se
+   registran ambas como ~2000 ms: la distribución queda truncada contra el
+   timeout, artificialmente comprimida, y deja de poder distinguir "lenta" de
+   "gravísima".
+2. **Se pierde el desenlace por completo.** Sin respuesta no hay `status`, no hay
+   `kind` y no se sabe si aquello habría sido un éxito, un error de negocio o una
+   caída. Una operación que iba a devolver `200` queda registrada exactamente
+   igual que una que iba a devolver `503`.
+3. **La disponibilidad medida empeora sin que el backend haya empeorado.** Una
+   respuesta lenta de `200` cuenta como `available = 1`; el mismo intento
+   abortado llega a `metrics.isAvailable()` con `httpStatus: "000"` y sin `kind`,
+   así que cuenta como `available = 0`. Igualar los valores convertiría éxitos
+   observables en indisponibilidad registrada.
+
+La ventana de 2000 a 5000 ms es justamente la que hay que poder observar **con
+información completa**, no solo la que hay que poder contar.
+
+El timeout **no garantiza** el presupuesto. Son cosas distintas: el presupuesto es
+un objetivo que se comprueba sobre respuestas reales, y el timeout es un límite
+que evita una espera insegura.
+
+> Todo lo que sigue describe **diseño y comportamiento verificado en el arnés de
+> pruebas** del propio repositorio. No hay aquí mediciones de tráfico real de
+> usuarios, y no se presenta ninguna como tal.
+
+### Decisión — medición
+
+- El cronómetro arranca **inmediatamente antes del intento de red**
+  (`http.js:400`), después de construir cabeceras.
+- Por eso la latencia del proveedor de autenticación **no contamina** la métrica:
+  `getToken()` puede ser asíncrono y se resuelve antes (`http.js:374`).
+- Se mide **hasta después de leer y parsear el cuerpo** (`http.js:414`): el cuerpo
+  es parte de lo que el usuario espera, no solo las cabeceras.
+- Cada intento HTTP deja **exactamente una muestra**, tanto en el camino de éxito
+  como en el de fallo de transporte.
+- Los **errores locales previos a la red** no generan muestra: no hubo petición que
+  medir.
+- **Timeout, aborto externo y error de red se distinguen** con banderas propias, no
+  por inferencia: un timeout aborta el controlador igual que una cancelación, así
+  que sin distinguirlos serían indistinguibles entre sí y de un fallo de red.
+- Un timeout conserva **la latencia realmente observada** hasta el aborto, no el
+  valor nominal del límite: es lo que el usuario esperó.
+- `budgetExceeded` se calcula comparando esa latencia con `latencyBudgetMs`
+  (`http.js:427`, `http.js:479`).
+- Los timeouts se cuentan **además por separado**, porque "cuántas peticiones
+  expiraron" y "cuántas excedieron el presupuesto" son dos preguntas distintas.
+- Los futuros aciertos de caché **no deben entrar** en los percentiles de red: no
+  midieron red. La distinción ya existe en `metrics.getNetworkSamples()`
+  (`metrics.js:135`), que filtra por `cacheHit === false`, aunque hoy ninguna
+  muestra lo tenga en `true`.
+
+### Decisión — disponibilidad
+
+`metrics.isAvailable()` (`metrics.js:81`) aplica una regla única:
+
+```text
+cualquier 2xx             → available = 1
+kind === "EXPECTED"       → available = 1
+cualquier otro resultado  → available = 0
+```
+
+Consecuencias, todas deliberadas:
+
+- Un **`204 No Content`** exitoso es **disponible**: el borrado funcionó.
+- Un **`422` con `kind: EXPECTED`** es **disponible**: el sistema respondió según su
+  especificación, y una regla de negocio incumplida no es una caída.
+- Un **`403` vacío** es **no disponible** para la métrica del cliente: no trae `kind`
+  y, desde el navegador, es una operación que no se pudo completar.
+- **Timeout y fallo de red** son **no disponibles**.
+- Un **error local de serialización** no representa un intento HTTP y **no entra** en
+  esta medición.
+
+**Relación con `backend/scripts/probe.sh`.** Los dos son **clientes externos al
+backend**: `probe.sh` mide con `curl` desde el entorno donde se ejecuta el script,
+y este módulo mide desde el navegador del usuario. Ninguno mide dentro del
+servidor. Las columnas del CSV pueden coincidir, pero **la definición exacta de
+`available` y el conjunto de operaciones observadas no son iguales** —`probe.sh`
+trata explícitamente `200` y `201`, y no ejercita las operaciones que responden
+`204`—. Por eso **no se deben concatenar ni promediar las dos fuentes sin
+normalizar** primero la semántica; si se combinan, cada muestra debe conservar su
+origen.
+
+### Decisión — degradación
+
+Lo implementado hoy, verificado en `session.js` y `http.js`:
+
+**`401 invalid_session` durante el refresh** — limpia la sesión, emite
+`session:expired` y propaga el mismo `HttpError`. Cubre también al usuario
+desactivado, porque el backend responde igual en los dos casos: el frontend **no
+inventa** un código propio como `user_inactive` que la API no entrega.
+
+**`503 data_unavailable` durante el refresh** — **no** se presenta como sesión
+expirada. Conserva el estado necesario para un reintento posterior, emite
+`system:degraded`, conserva el error y su `requestId`, y **no crea un intervalo ni
+un bucle automático**: no programa inmediatamente otro refresh. Un cliente que
+reintenta solo contra un backend caído multiplica la carga justo cuando menos
+puede soportarla.
+
+**Timeout o red durante el refresh** — conserva el estado, **no** emite expiración,
+propaga el error y no crea bucles. Solo el `401 invalid_session` cierra la sesión.
+
+**`403` en cualquier petición** — emite `session:forbidden`, **conserva la sesión**,
+**no refresca** y propaga el error con su `requestId`, que llega en `X-Request-Id`
+incluso cuando el cuerpo viene vacío.
+
+**Lo que todavía NO existe**, y no debe leerse como implementado:
+
+- El **banner visual de degradación**: `frontend/index.html` no ha sido migrado y
+  sigue cargando el `app.js` legado, así que ningún componente consume
+  `system:degraded`.
+- El **modo de consulta** durante una degradación: el motor CRUD no existe.
+- El **botón de reintento manual**: no existe.
+- La **política futura** permitirá como máximo **dos reintentos manuales**. Está
+  decidida, no construida, y el límite es deliberado: los reintentos los pide una
+  persona, no un bucle.
+
+### Alternativas descartadas
+
+1. **Un solo valor para presupuesto y timeout.** No es que dejara de medirse: el
+   intento abortado **siempre** deja su muestra, con la latencia observada y
+   `timeout: true`, y **siempre** entra en los percentiles. Lo que ya no está
+   garantizado es la marca de incumplimiento, porque `budgetExceeded` se calcula
+   aparte, con la comparación estricta `latencyMs > budget`: un aborto observado
+   *por encima* del presupuesto queda marcado, pero con los dos valores iguales la
+   latencia observada cae justo alrededor del umbral y la comparación puede no
+   cumplirse. La conclusión no depende de ese detalle: la muestra entra en los
+   percentiles pero queda **censurada y sin desenlace** —latencia truncada contra
+   el timeout en vez de la real, sin `status` ni `kind`—, y una respuesta lenta
+   pero correcta pasaría a contabilizarse como no disponible. Se mediría igual de
+   cantidad y peor de calidad.
+2. **No usar timeout.** Una petición que nunca responde deja a la aplicación
+   esperando indefinidamente, con el usuario mirando una pantalla que no cambia y
+   sin forma de saber que no va a cambiar.
+3. **Medir solo las respuestas exitosas.** Produce un panel que mejora cuando el
+   sistema empeora: cuantos más fallos, mejor se ve lo que queda.
+4. **Contar los fallos locales como fallos de red.** Un cuerpo no serializable es un
+   defecto del frontend; clasificarlo como red haría que apareciera como
+   indisponibilidad del backend y contaminaría la métrica que sirve para decidir.
+5. **Cerrar sesión ante cualquier error del refresh.** Convertiría una caída
+   temporal del tier de datos en una expulsión del usuario: un fallo del frontend,
+   no del backend.
+6. **Reintentar un `503` automáticamente y sin límite.** Multiplica la carga sobre
+   un backend que ya está caído, y desde N clientes a la vez.
+7. **Mezclar los aciertos de caché con los percentiles de red.** Un acierto de caché
+   no midió red; incluirlo haría que el p95 "mejorara" al añadir caché sin que la
+   red fuera más rápida.
+8. **Promediar directamente navegador y `probe.sh`.** Distinta definición de
+   `available` y distinto conjunto de operaciones: el promedio sería un número sin
+   significado.
+9. **Tratar el `403` como expiración de sesión.** Un `403` no dice que la sesión sea
+   inválida, sino que esa operación no está permitida; cerrar sesión expulsaría a
+   un usuario perfectamente autenticado por pulsar un botón que no le corresponde.
+
+### Tácticas aplicadas
+
+| Táctica | Dónde se aplica |
+|---|---|
+| **Timeout / Unsafe State Detection** (Cap. 10, *Safety*) | Toda petición tiene un límite duro. Seguir esperando una respuesta que no va a llegar es el estado inseguro que esta táctica detecta y corta. |
+| **Degradation** (Cap. 10, *Safety*) | Ante un `503` se conservan las funciones que siguen siendo posibles —la sesión local sigue viva mientras el access token no expire— en vez de convertir una caída del tier de datos en una expiración falsa. |
+| **Clasificación de disponibilidad** (Cap. 4) | El resultado se clasifica por respuesta, `kind`, timeout y fallo de transporte, con la taxonomía `EXPECTED`/`FAULT`/`FAILURE` como criterio de qué cuenta contra la disponibilidad. |
+| **Monitor Resources / Metering** (Cap. 6) | Cada intento real deja su muestra, incluidos los que fallan, y el resumen separa timeouts de incumplimientos de presupuesto. |
+
+Conviene no confundir dos responsabilidades que recaen sobre el **mismo
+mecanismo**: el **Cap. 10 justifica abortar** —seguir esperando es inseguro—, y el
+**Cap. 4 determina cómo se clasifica y contabiliza** el resultado de ese aborto —el
+intento cuenta como no disponible—. El timeout participa en las dos, y por eso su
+código vive en `http.js` mientras la regla que lo clasifica vive en `metrics.js`.
+
+### Costo aceptado
+
+- **Dos parámetros que hay que mantener coherentes.** Si alguien iguala los dos
+  valores, o pone el presupuesto por encima del timeout, la medición deja de
+  significar lo que dice. Es una invariante que solo protege la documentación y
+  una prueba.
+- **Clasificación más compleja.** Distinguir timeout, aborto externo, red y fallo
+  local exige banderas y orden de comprobación, en vez de un `catch` único.
+- **Una ventana de 2 a 5 segundos** en la que la aplicación sigue esperando aunque
+  el presupuesto ya se incumplió. Es deliberado: preferimos una respuesta lenta
+  —con su latencia real, su `status` y su `kind`— a un aborto temprano que dejaría
+  una muestra empobrecida, con la latencia truncada contra el timeout y sin
+  desenlace conocido.
+- **Estado conservado tras un `503`.** El registro de sesión sobrevive a una caída
+  del tier de datos, lo que alarga la vida de un refresh token en el cliente a
+  cambio de no expulsar al usuario por un fallo que no es suyo.
+- **Hay que distinguir las fuentes de medición.** Navegador y `probe.sh` no son
+  intercambiables, y cualquier análisis conjunto exige normalizar antes.
+- **Ausencia deliberada de reintentos ilimitados.** Ante un backend caído, el
+  cliente no insiste solo; la recuperación depende de una acción del usuario. Se
+  acepta a cambio de no amplificar la caída.
+- **Una respuesta lenta consume recursos hasta llegar o hasta el timeout.** La
+  conexión, el temporizador y la promesa siguen vivos durante esos segundos.

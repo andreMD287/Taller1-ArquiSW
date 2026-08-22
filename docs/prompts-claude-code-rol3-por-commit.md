@@ -17,7 +17,8 @@ sobre qué código opera, qué debe producir y qué no debe tocar.
 |---|---|---|
 | 1 | `docs: contrato de API consumido por el frontend y ADR-F01 (estructura del tier de presentacion)` (`4847dff`) | Hecho |
 | 2 | `feat: configuracion externa y cliente HTTP unico con timeout, correlacion y medicion` (`09301f5`) | Hecho |
-| 3 | `feat: sesion con refresh silencioso, cola de refresh y eventos de sesion` | **Pendiente — prompt abajo** |
+| 3 | `feat: sesion con refresh silencioso, cola de refresh y eventos de sesion` (`e292902`) | Hecho — prompt abajo |
+| 4 | `docs: registra ADR-F02 (cliente HTTP unico) y ADR-F03 (timeout, presupuesto y degradacion)` | **Listo para guardar — sin commit todavía** |
 
 Lo que el commit 2 dejó en pie y que el commit 3 debe respetar:
 
@@ -602,4 +603,79 @@ refresh; y cómo garantizas que la sustitución del par de tokens sea atómica.
 
 No hagas el commit. Déjalo listo con el mensaje:
 feat: sesion con refresh silencioso, cola de refresh y eventos de sesion
+```
+
+---
+
+## Commit 4 — ADR-F02 y ADR-F03
+
+**Mensaje:** `docs: registra ADR-F02 (cliente HTTP unico) y ADR-F03 (timeout, presupuesto y degradacion)`
+
+**Estado:** los archivos están escritos pero **todavía sin commit**; el índice está
+vacío. Se describe aquí como listo para guardar, no como versionado.
+
+**Objetivo.** Registrar como decisiones de arquitectura dos cosas que ya están
+implementadas y verificadas en el código, no proponerlas. ADR-F02 documenta el
+cliente HTTP único y la inversión de dependencia con la sesión; ADR-F03 documenta
+por qué el timeout y el presupuesto de latencia son valores distintos, cómo se
+mide, cómo se clasifica la disponibilidad y qué degradación existe hoy.
+
+**Archivos modificados**
+
+- `docs/DECISIONS-FRONTEND.md` — se añaden ADR-F02 y ADR-F03 después de ADR-F01,
+  con su mismo formato (Fecha, Estado, Contexto, Decisión, Alternativas
+  descartadas, Razón, Tácticas aplicadas, Costo aceptado).
+- `docs/prompts-claude-code-rol3-por-commit.md` — esta entrada y la tabla de
+  estado.
+- `frontend/config.js` — **corrección exclusivamente documental**: su comentario de
+  cabecera explicaba de forma incorrecta la relación entre el timeout y el
+  presupuesto de latencia (afirmaba que igualarlos dejaría el contador de
+  incumplimientos en cero, cuando el código sí registra una muestra por cada
+  timeout). Se reescribió ese párrafo para que no contradiga a ADR-F03. **No
+  cambiaron los valores exportados ni el comportamiento**: `requestTimeoutMs: 5000`
+  y `latencyBudgetMs: 2000` siguen exactamente igual, y no se modificó ninguna
+  línea ejecutable.
+
+Un commit `docs:` puede tocar un comentario dentro de código cuando el cambio no
+altera el comportamiento y elimina una contradicción con el ADR que se registra;
+dejar la contradicción para otro commit sería publicar un ADR que el propio
+código desmiente.
+
+No se toca `backend/**`, `docs/DECISIONS.md`, `frontend/CONTRATO.md`,
+`frontend/src/**`, `frontend/tests/**`, `frontend/app.js`, `frontend/index.html`
+ni `frontend/styles.css`.
+
+**ADR añadidos**
+
+| ADR | Título | Estado |
+|---|---|---|
+| ADR-F02 | Cliente HTTP único y sesión por inversión de dependencia | Aceptada |
+| ADR-F03 | Timeout distinto del presupuesto de latencia y degradación controlada | Aceptada |
+
+**Verificaciones hechas antes de escribir una sola línea**
+
+Una decisión no se documenta como aceptada si no está implementada, así que las
+precondiciones se comprobaron contra el código, no contra el recuerdo:
+
+- Los cinco módulos y el arnés existen y están versionados.
+- `http.js` implementa `retryAuth` (`http.js:336`).
+- `session.js` usa `configureAuthProvider()` (`session.js:237`).
+- `http.js` no importa `session.js`: sus tres imports son `config.js`,
+  `metrics.js` y `errors.js` (`http.js:41-43`).
+- La única promesa compartida de refresh vive en `session.js` (`session.js:175`);
+  en `http.js` la palabra `refreshPromise` solo aparece en un comentario que
+  explica que allí NO está.
+- Las pruebas se ejecutaron en navegador real, sirviendo el repositorio por HTTP:
+  **71 pasaron, 0 fallaron, 71 en total**.
+
+También se comprobó lo que **no** está migrado, para no documentarlo como hecho:
+`frontend/app.js` sigue llamando a `fetch()` con una URL absoluta
+(`app.js:14-15`) y `frontend/index.html:46` sigue cargándolo. La invariante del
+cliente único se enuncia por eso sobre `frontend/src/**`, y el legado queda
+declarado como deuda con fecha de vencimiento.
+
+**Mensaje previsto**
+
+```text
+docs: registra ADR-F02 (cliente HTTP unico) y ADR-F03 (timeout, presupuesto y degradacion)
 ```
