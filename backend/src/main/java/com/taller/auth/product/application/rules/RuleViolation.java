@@ -5,7 +5,7 @@ package com.taller.auth.product.application.rules;
  *
  * Deliberadamente NO conoce HTTP: no lleva status code ni nada especifico de
  * la capa web. Traducir esto a una respuesta de error es responsabilidad de
- * la capa api y del GlobalExceptionHandler (pendiente: ADR-007).
+ * la capa api y del GlobalExceptionHandler (ver ADR-007).
  *
  * @param rule    identificador estable de la regla, para logs y diagnostico.
  *                No es texto de UI: no se traduce ni cambia con el mensaje.

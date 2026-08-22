@@ -1,10 +1,11 @@
 package com.taller.auth.product.application.rules;
 
-import com.taller.auth.product.domain.Product;
-import org.springframework.stereotype.Component;
-
 import java.util.List;
 import java.util.Optional;
+
+import org.springframework.stereotype.Component;
+
+import com.taller.auth.product.domain.Product;
 
 /**
  * Aplica todas las reglas de negocio de producto y acumula sus violaciones.
@@ -36,7 +37,7 @@ public class ProductRuleEngine {
      *
      * No lanza: devolver la lista deja en manos del servicio que llama la
      * decision de que hacer con ella. Asi el motor no queda atado a una
-     * estrategia de manejo de excepciones que todavia no esta cerrada (ADR-007).
+     * estrategia de manejo de excepciones definida en ADR-007..
      *
      * @return lista vacia si el producto cumple todas las reglas.
      */
