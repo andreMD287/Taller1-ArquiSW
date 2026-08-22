@@ -807,12 +807,52 @@ interno de la política de bloqueo, no del recurso.
    el formulario de edición incluye un selector de rol; si va aparte, es una acción
    separada en la fila. Cualquiera sirve; hay que saber cuál.
 
-2. **El caso del último ADMIN.** `docs/DECISIONS.md` lo tiene abierto (punto 7 del
-   checklist con Rol 2, sin respuesta). Cuando la operación se rechace, el frontend
-   necesita **un `code` estable propio** —p. ej. `last_admin_protected`, `409` o
-   `422`— para poder explicar por qué falló. Un `500` genérico o un mensaje libre no
-   se pueden traducir a una UI útil. Aplica tanto a degradar el propio rol como a
-   eliminar la cuenta.
+2. **El caso del último ADMIN.** Aquí hay que separar dos cosas que es fácil
+   confundir, porque una ya existe y la otra no:
+
+   **(a) El contrato de error — ✅ VERIFICADO en código.** Ya no hace falta pedirlo:
+   `exception/LastAdminException.java` lo fija, y el frontend puede programar contra
+   él desde ya. Leído directamente de la clase:
+
+   | Campo | Valor |
+   |---|---|
+   | `code` | `last_admin_protected` |
+   | HTTP | `409 Conflict` |
+   | `kind` | `EXPECTED` — no cuenta contra la disponibilidad (ADR-007) |
+   | `retryable` | `false` — reintentar daría exactamente lo mismo |
+   | `message` | `"No se puede desactivar ni quitar el rol al ultimo administrador activo"` |
+
+   Hereda de `AppException`, así que `GlobalExceptionHandler` la traduce a un
+   `ErrorResponse` completo con su `requestId`, igual que cualquier otro error de
+   negocio. Es exactamente el `code` estable que esta sección venía pidiendo: la
+   pregunta queda **respondida**.
+
+   **(b) La protección en sí — ⚠️ PENDIENTE, no implementada.** Que el contrato esté
+   definido **no significa que la regla se aplique**. Verificado por búsqueda sobre
+   el código integrado:
+
+   - `LastAdminException` **no se lanza ni se construye en ningún sitio**: la única
+     aparición en todo `backend/src/` es su propia declaración.
+   - `UserRepository.findActiveByRoleForUpdate(Role)` existe con
+     `@Lock(PESSIMISTIC_WRITE)` —el interlock que haría segura la comprobación frente
+     a dos operaciones concurrentes— pero **nadie la invoca**. Lo mismo vale para
+     `countByRoleAndActiveTrue`.
+   - **No existe operación administrativa de usuarios** que pudiera aplicar la regla:
+     no hay servicio de usuarios, no hay endpoint fuera de `/api/auth/**` y
+     `/api/diagnostics`, y en código productivo nadie llama a `User.setRole()` ni
+     desactiva una cuenta.
+   - **No hay pruebas** de la invariancia: ninguna prueba del backend menciona la
+     regla, y no existe ninguna prueba concurrente —no aparece `ExecutorService`,
+     `CountDownLatch` ni `CompletableFuture` en toda la suite— que demuestre que dos
+     operaciones simultáneas no pueden dejar el sistema sin administradores.
+
+   Es decir: hoy son **piezas preparatorias**, no comportamiento ejecutable. Cuando
+   exista el CRUD de usuarios (esta misma §6.1, aún propuesta), la regla tendrá que
+   implementarse y probarse; el frontend no la replica ni la anticipa —§4.1— y se
+   limitará a mostrar el `message` del `409 last_admin_protected` si algún día llega.
+
+   **Aplica tanto a degradar el propio rol como a eliminar la cuenta**, según dice el
+   mensaje de la excepción.
 
 3. **Cambiar el propio `username`.** ADR-002 dice que el `username` es mutable y que
    por eso el `subject` del JWT pasó a ser el ID. Si el frontend lo permite, el
@@ -974,6 +1014,8 @@ mensaje—. Este documento no estima el costo de ninguna de las dos.
 | 6b | Usuarios desactivados no inician sesión ni renuevan | ✅ Verificado tras el merge (§3.2, §3.4). Cierra la pregunta 4 de §6.1 | — |
 | 7 | `POST /api/products/{id}/restore` | 🟡 Propuesto (§6.2) | Rol 1 |
 | 8 | CRUD de usuarios | 🟡 Propuesto (§6.1); ya registrado como pendiente por Rol 1 | Rol 1 / Rol 2 |
+| 8b | Código de error del último ADMIN | ✅ Verificado: `LastAdminException` fija `last_admin_protected`, `409`, `EXPECTED`, no reintentable (§6.1). Cierra la pregunta 2 de §6.1 | — |
+| 8c | Protección del último ADMIN en ejecución | ⚠️ **Pendiente**: la excepción no se lanza, `findActiveByRoleForUpdate` no se invoca, no hay operación administrativa que aplique la regla ni pruebas —tampoco concurrentes— (§6.1) | Rol 1 / Rol 2 |
 | 9 | Cabecera `Idempotency-Key` | 🟡 Propuesto (§6.4) — no honrado por el backend aún | Rol 1 |
 | 10 | `message` de `name.must-be-unique` con nombre de producto eliminado | 🟡 Propuesto (§6.5) — petición de revisión; el frontend no amplía el mensaje | Rol 1 |
 
