@@ -1,4 +1,4 @@
-package com.taller.auth.product.api;
+package com.taller.auth.dto;
 
 import org.springframework.data.domain.Page;
 
@@ -8,12 +8,18 @@ import java.util.function.Function;
 /**
  * Pagina de resultados en su forma de transporte.
  *
- * Existe por la misma razon que ProductResponse (ADR-006): no se expone un
+ * Existe por la misma razon que el resto de DTOs (ADR-006): no se expone un
  * tipo interno por HTTP. Serializar directamente el Page de Spring Data
  * publicaria la forma de una clase del framework -con campos como "pageable",
  * "sort" y "numberOfElements"- que puede cambiar entre versiones de Spring y
- * dejaria a Rol 3 acoplado a ella. Spring Boot 3.3 incluso advierte en el log
- * contra hacerlo.
+ * dejaria al cliente acoplado a ella. Spring Boot 3.3 incluso advierte en el
+ * log contra hacerlo.
+ *
+ * Vive en el paquete compartido y no dentro de un modulo de feature porque lo
+ * usan tanto el listado de productos como el de usuarios: si viviera en
+ * product/, el codigo de usuarios dependeria del modulo de productos y se
+ * invertiria la direccion de las dependencias (mismo criterio que
+ * FieldViolation en ADR-007).
  *
  * @param content       elementos de esta pagina.
  * @param page          indice de pagina, empezando en 0.

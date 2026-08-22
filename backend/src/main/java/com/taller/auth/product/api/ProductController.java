@@ -1,5 +1,6 @@
 package com.taller.auth.product.api;
 
+import com.taller.auth.dto.PageResponse;
 import com.taller.auth.product.application.ProductService;
 import com.taller.auth.product.domain.Product;
 import jakarta.validation.Valid;
@@ -24,17 +25,10 @@ import org.springframework.web.bind.annotation.RestController;
  * reglas viven en el motor y la orquestacion en el servicio.
  *
  * AUTORIZACION: leer requiere estar autenticado, escribir requiere ADMIN.
- *
- * ATENCION — los @PreAuthorize de esta clase NO ESTAN ACTIVOS todavia. Hacen
- * falta dos piezas que son de Rol 2 y aun no existen:
- *   1. @EnableMethodSecurity en SecurityConfig. Sin ella, Spring IGNORA estas
- *      anotaciones EN SILENCIO — no fallan, simplemente no se aplican.
- *   2. Un filtro que traduzca el JWT a un Authentication con authorities. Sin
- *      el, .anyRequest().authenticated() de SecurityConfig hace que estos
- *      endpoints respondan 403 a todo el mundo.
- * Es decir: hoy estos endpoints estan cerrados por completo, y en cuanto se
- * agregue solo la pieza 2 sin la 1, quedarian abiertos a cualquier usuario
- * autenticado. Las dos tienen que llegar juntas.
+ * Los @PreAuthorize de esta clase se aplican de verdad: SecurityConfig declara
+ * @EnableMethodSecurity y JwtAuthenticationFilter construye el Authentication
+ * con la autoridad ROLE_<rol> a partir del claim del JWT. Verificado por
+ * ProductSecurityIT.
  */
 @RestController
 @RequestMapping("/api/products")

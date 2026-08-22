@@ -826,3 +826,134 @@ Las operaciones sensibles del módulo de productos utilizan:
 
 ```java
 @PreAuthorize("hasRole('ADMIN')")
+---
+
+## ADR-014 — Autorización de usuarios: endpoints separados por privilegio
+
+**Fecha:** 2026-08-22
+**Estado:** Aceptada — **implementada**
+
+### Decisión
+
+| Operación | Quién puede |
+|---|---|
+| `GET /api/users` | Solo ADMIN |
+| `GET /api/users/{id}` | El propio usuario o ADMIN |
+| `PUT /api/users/{id}` (username) | El propio usuario o ADMIN |
+| `PATCH /api/users/{id}/password` | **Solo el propio usuario** |
+| `PATCH /api/users/{id}/role` | Solo ADMIN |
+| `DELETE /api/users/{id}` | El propio usuario o ADMIN |
+
+El rol y la contraseña viajan en **endpoints propios**, no como campos del `PUT`.
+
+### Razón de los endpoints separados
+
+Si `role` y `password` fueran campos del mismo cuerpo que `username`, la
+autorización del `PUT` tendría que depender de **qué campos trae la petición**:
+*"puedes editarte a ti mismo, salvo estos dos"*. Ese condicional es exactamente
+donde se cuelan las escaladas de privilegio — basta olvidar una rama, o que
+alguien agregue un campo nuevo sin revisar la condición, para que un usuario se
+promueva a ADMIN. Separados, cada endpoint tiene **una regla sin ramas**.
+
+### Por qué un ADMIN no puede cambiar la contraseña de otro
+
+Se descartó el *reset administrativo*. Un ADMIN que puede fijar la clave de
+cualquiera puede suplantar a cualquiera, y eso destruye el no repudio de todo el
+sistema: ninguna acción registrada sería atribuible con certeza a su dueño. El
+costo aceptado es que no hay recuperación de contraseña olvidada; eso exige un
+flujo aparte (correo, token de un solo uso) que queda fuera de alcance.
+
+Se exige la contraseña vigente **aunque el usuario ya esté autenticado**, y no es
+redundante: acota el daño de un token robado. Con la sesión secuestrada un
+atacante puede leer y editar el perfil, pero no puede quedarse con la cuenta.
+
+### Por qué el listado es solo ADMIN
+
+El directorio completo de cuentas es material de partida para ataques dirigidos.
+Un USER normal consulta su propio perfil por `GET /users/{id}`.
+
+### Mecanismo del "self"
+
+`@PreAuthorize("@userSecurity.isSelf(#id) or hasRole('ADMIN')")`, con
+`UserSecurity` como bean en vez de comparar dentro del SpEL
+(`authentication.principal == #id`). Dos razones: el principal lo pone
+`JwtAuthenticationFilter` y es un `Long`, así que un cambio de tipo haría que la
+comparación en SpEL diera `false` **en silencio**; y como bean la regla se puede
+probar. Falla cerrado ante cualquier duda.
+
+**Evidencia:** `UserSecurityTest`, incluido
+`unPrincipalDeOtroTipoNoSeInterpretaComoCoincidencia`.
+
+### Táctica del Cap. 8 aplicada
+
+**Restrict dependencies** + **increase semantic coherence**: cada endpoint
+concentra una única regla de autorización, y cambiar la política de un privilegio
+no obliga a releer las demás.
+
+---
+
+## ADR-015 — Interlock del último ADMIN con bloqueo pesimista
+
+**Fecha:** 2026-08-22
+**Estado:** Aceptada — **implementada**
+
+### Decisión
+
+Las dos operaciones que pueden reducir el número de administradores —dar de baja
+a un ADMIN y degradarlo a USER— ejecutan, **dentro de una sola `@Transactional`**:
+
+1. `userRepository.findActiveByRoleForUpdate(Role.ADMIN)` — `SELECT ... FOR UPDATE`
+2. verificar que quede al menos otro ADMIN activo distinto del que sale
+3. mutar y guardar
+
+Las operaciones que **no** pueden reducir admins (dar de baja a un USER, promover
+USER→ADMIN) no toman el bloqueo: serializa operaciones y no hay invariante que
+proteger.
+
+### Por qué un `count` no basta
+
+Con el aislamiento por defecto (`READ_COMMITTED`), dos transacciones que dan de
+baja a dos administradores distintos leerían ambas *"hay 2 admins"*, ambas
+concluirían que pueden proceder, y el sistema terminaría en **0**. Es la condición
+de carrera del Cap. 9: dos decisiones correctas por separado, incorrectas juntas.
+
+El `SELECT ... FOR UPDATE` bloquea las filas de todos los admins activos. La
+segunda transacción espera; cuando la primera confirma, la segunda relee y ya ve
+un solo admin, así que se rechaza.
+
+### Por qué bloquear filas es suficiente
+
+Un `SELECT FOR UPDATE` no impide inserciones fantasma. Aquí no hace falta: un
+`INSERT` solo puede **agregar** administradores, nunca reducirlos a cero. El único
+caso peligroso es la modificación concurrente de filas existentes, y eso sí lo
+cubre el bloqueo. No se necesita `SERIALIZABLE`.
+
+### Por qué el invariante importa
+
+Si se violara, **no habría salida por la interfaz**: solo un ADMIN puede asignar
+el rol ADMIN, así que recuperarlo exigiría editar la base de datos a mano. Es la
+definición de un *interlock* del Cap. 10 — un estado al que el sistema no debe
+poder llegar por ninguna secuencia de operaciones legítimas.
+
+### Código HTTP
+
+**409 Conflict**, no 422. La petición es válida y el estado del recurso es
+correcto; lo que impide la operación es el estado **global** del sistema en ese
+momento. La misma petición será válida en cuanto exista otro ADMIN activo.
+
+### Evidencia
+
+- `UserServiceTest.darDeBajaAlUltimoAdminActivoEsRechazado`
+- `UserServiceTest.degradarAlUltimoAdminAUserEsRechazado`
+- `UserServiceTest.elInterlockUsaElBloqueoPesimistaYNoUnConteo` — falla si alguien
+  sustituye el bloqueo por `countByRoleAndActiveTrue`
+- `UserServiceTest.darDeBajaAUnUserNoTomaElBloqueo` y
+  `promoverUnUserAAdminNoTomaElBloqueo` — el bloqueo se toma solo cuando hace falta
+
+**Verificación:** `./mvnw test` → 121 tests, 0 fallos, `BUILD SUCCESS`.
+
+### Pendiente de Rol 2
+
+El test de **concurrencia real** (dos transacciones simultáneas contra Postgres)
+lo monta Rol 2. Los tests de arriba verifican la lógica y el uso del mecanismo,
+no el comportamiento del motor bajo contención.
