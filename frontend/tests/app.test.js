@@ -922,8 +922,14 @@ test("app 36: el 401 mínimo {\"code\":\"unauthorized\"} se normaliza sin exigir
     const { shell } = await loadShell();
     // Forma EXACTA de SecurityConfig: un solo campo, y el requestId solo en la
     // cabecera. Sin message, sin detail, sin kind, sin requestId en el cuerpo.
-    const net = installFetch((url) => {
+    //
+    // El listado autenticado responde 200 a propósito: aquí se aísla la
+    // NORMALIZACIÓN del cuerpo, y si el CRUD recibiera el 401 dispararía el
+    // refresh reactivo —que es correcto, y se prueba en app 38— contaminando
+    // el conteo de esta prueba.
+    const net = installFetch((url, init) => {
         if (url.includes("/api/auth/login")) return jsonResponse(200, tokens());
+        if ((init && init.method || "GET") === "GET") return jsonResponse(200, emptyPage);
         return makeResponse({
             status: 401,
             body: '{"code":"unauthorized"}',
@@ -936,7 +942,10 @@ test("app 36: el 401 mínimo {\"code\":\"unauthorized\"} se normaliza sin exigir
         await app.ready;
         await loginThrough(app, shell);
 
-        const fallo = await post("/api/products", { body: { name: "X", price: 1, stock: 1 } })
+        // La petición sale SIN Bearer (auth:false), así que este 401 se propaga
+        // sin tocar la sesión: es el camino que aísla la NORMALIZACIÓN del
+        // cuerpo. El refresh reactivo se prueba justo debajo, en app 38.
+        const fallo = await post("/api/products", { auth: false, body: { name: "X", price: 1, stock: 1 } })
             .then(() => null, (e) => e);
         assert(fallo !== null, "el 401 se propaga");
         const model = fallo.error;
@@ -953,9 +962,9 @@ test("app 36: el 401 mínimo {\"code\":\"unauthorized\"} se normaliza sin exigir
         assertDeepEqual(model.violations, [], "violations normalizado a arreglo");
         assertDeepEqual(model.violationsByField, {}, "y su índice");
 
-        // Un 401 que NO es invalid_session no dispara el refresh silencioso.
+        // Sin Bearer no hay sesión que renovar: cero refresh.
         assertEqual(net.calls.filter((c) => c.url.includes("/api/auth/refresh")).length, 0,
-            "no se refresca por un 401 unauthorized");
+            "un 401 sobre una petición sin Authorization no dispara refresh");
     } finally { net.restore(); cleanup(); }
 });
 
@@ -1004,5 +1013,82 @@ test("app 37: una respuesta parcial de Spring Security no rompe el parseo y sigu
                 caso + ": ningún 403 dispara refresh");
         } finally { net.restore(); cleanup(); }
     }
+});
+
+test("app 38: un 401 unauthorized sobre la sesión montada renueva y reintenta sin volver al login", async () => {
+    fresh();
+    const { shell } = await loadShell();
+    let listados = 0;
+    let refrescos = 0;
+    const net = installFetch((url) => {
+        if (url.includes("/api/auth/login")) return jsonResponse(200, tokens());
+        if (url.includes("/api/auth/refresh")) {
+            refrescos += 1;
+            return jsonResponse(200, tokens({ username: "maria123" }));
+        }
+        listados += 1;
+        // El primer listado tras montar responde 200; el siguiente caduca.
+        if (listados === 2) {
+            return makeResponse({
+                status: 401,
+                body: '{"code":"unauthorized"}',
+                headers: { "Content-Type": "application/json", "X-Request-Id": "req-caducado" }
+            });
+        }
+        return jsonResponse(200, productPage([product(1)]));
+    });
+    try {
+        const app = launch(shell);
+        await app.ready;
+        await loginThrough(app, shell);
+        const instancia = app.getInstance();
+
+        await instancia.reload();          // dispara el 401 → refresh → reintento
+        await tick(6);
+
+        assertEqual(refrescos, 1, "exactamente un refresh");
+        assertEqual(listados, 3, "el listado se reintentó una sola vez");
+        assertEqual(shell.dataset.view, "app", "la sesión sobrevive: NO se vuelve al login");
+        assertEqual(session.isAuthenticated(), true, "y sigue autenticada");
+        assertEqual(app.getInstance(), instancia, "sin desmontar el CRUD");
+        assertEqual(instancia.getState().error, null, "la recuperación es transparente para la UI");
+        assert(shell.querySelectorAll("tbody tr").length > 0, "y la tabla queda con datos");
+    } finally { net.restore(); cleanup(); }
+});
+
+test("app 39: si el refresh falla tras un 401 unauthorized, se muestra ESE fallo, no el 401", async () => {
+    fresh();
+    const { shell } = await loadShell();
+    let listados = 0;
+    const net = installFetch((url) => {
+        if (url.includes("/api/auth/login")) return jsonResponse(200, tokens());
+        if (url.includes("/api/auth/refresh")) {
+            return errorResponse(503, { code: "data_unavailable", kind: "FAILURE",
+                                        retryable: true, requestId: "req-refresh-503" });
+        }
+        listados += 1;
+        if (listados === 2) {
+            return makeResponse({
+                status: 401,
+                body: '{"code":"unauthorized"}',
+                headers: { "Content-Type": "application/json", "X-Request-Id": "req-401" }
+            });
+        }
+        return jsonResponse(200, productPage([product(1)]));
+    });
+    try {
+        const app = launch(shell);
+        await app.ready;
+        await loginThrough(app, shell);
+        await app.getInstance().reload();
+        await tick(8);
+
+        // El incidente real es el 503 del refresh; el 401 solo lo destapó.
+        const traza = shell.querySelector(".crud__error-trace");
+        assert(traza === null || traza.textContent.indexOf("req-401") === -1,
+            "no se atribuye el fallo al 401 original: " + (traza ? traza.textContent : "(sin traza)"));
+        assertEqual(listados, 2, "la petición original NO se reintenta si el refresh falló");
+        assertEqual(clock.pending(), 0, "y no se programa ningún reintento automático");
+    } finally { net.restore(); cleanup(); }
 });
 }

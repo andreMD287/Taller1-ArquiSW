@@ -242,18 +242,48 @@ El 403 de `@PreAuthorize` trae `kind: "EXPECTED"`, así que la regla única de
 USER una escritura de ADMIN es el sistema cumpliendo su especificación, no una
 caída. Un 403 *sin* `kind` seguiría contando como no disponible.
 
-#### Un hueco abierto que este cambio destapa — ⚠️ ABIERTO
+#### Renovación reactiva ante un 401 — ✅ RESUELTO
 
-`platform/http.js` solo intenta el refresh silencioso ante `401` **con
-`code: "invalid_session"`**. Pero `InvalidSessionException` la captura y descarta
-`JwtAuthenticationFilter`, de modo que un access token caducado contra
-`/api/products` llega al cliente como `401 unauthorized`, **no** como
-`invalid_session`. Consecuencia: sobre los endpoints de productos ese reintento
-automático ya no se dispara. Hoy no rompe nada porque `session.js` renueva de forma
-proactiva antes del vencimiento, pero **el respaldo reactivo dejó de cubrir esa
-ruta**. Verificado leyendo `JwtAuthenticationFilter`, `TokenService.validateAccessToken`
-y `SecurityConfig`; queda registrado, no resuelto — cambiar la condición del
-reintento es una decisión de diseño, no una sincronización de documentación.
+Cuando una petición que **salió con `Authorization: Bearer`** recibe un `401`,
+`platform/http.js` pide **una** renovación al proveedor de sesión y reintenta la
+petición **una** sola vez, con el token nuevo.
+
+Los dos `code` posibles cuentan por igual —`invalid_session` y `unauthorized`—
+porque solo se distinguen por **dónde nacen**, no por lo que significan para el
+cliente: `invalid_session` sale de un controlador de `/api/auth/**`, y
+`unauthorized` del entry point de `SecurityConfig`, que es el que llega en
+cualquier endpoint protegido. Un access token caducado contra `/api/products`
+produce SIEMPRE el segundo, porque `JwtAuthenticationFilter` captura
+`InvalidSessionException`, limpia el `SecurityContext` y deja seguir la petición,
+que muere en `.anyRequest().authenticated()` sin alcanzar nunca un controlador.
+
+**El frontend NO puede distinguir un token vencido de uno ilegible.** El filtro
+trata ambos igual y los dos llegan como `unauthorized`. El cliente no decodifica
+el JWT para averiguarlo: pide un refresh y deja que el backend decida. Si el
+token era irrecuperable, la renovación fallará y **ese** error es el que se
+propaga.
+
+**Un `401` sobre una petición SIN `Authorization` no dispara nada.** Se propaga
+tal cual, con su `requestId` de cabecera, sin tocar la sesión: no había sesión
+que renovar. No basta con mirar el parámetro `auth`, porque una llamada a un
+endpoint protegido hecha sin sesión conserva el valor por defecto `auth:true` y
+aun así sale sin token. `http.js` captura, justo después de construir las
+cabeceras, si esa petición concreta llevó `Authorization`, y no vuelve a
+preguntarle al proveedor: entre la salida y la respuesta puede haber ocurrido un
+login, un logout o un refresh, y consultarlo después respondería por el estado
+de *ahora*, no por el de esa petición.
+
+Garantías del reintento:
+
+| Garantía | Cómo se sostiene |
+|---|---|
+| Exactamente un refresh y un reintento | El reintento va con `retryAuth:false`, así que un segundo `401` se propaga sin volver a entrar en el ciclo |
+| Token nuevo en el reintento | Se reconstruyen las cabeceras; `http.js` no manipula el token, lo pide con `getToken()` |
+| Una muestra de métricas por intento | Son dos peticiones HTTP reales; ocultar una falsearía la disponibilidad medida |
+| El error del refresh se propaga tal cual | Un `503` de la renovación llega al llamador como `503` con **su** `requestId`, no disfrazado del `401` que lo destapó |
+| Refresh concurrentes coordinados en un solo sitio | `session.js` es el único dueño de la promesa de renovación. Si diez peticiones reciben `401` a la vez, hay **un** canje del refresh token. `http.js` pide renovar; no coordina |
+
+Un `403` nunca refresca (§1.5, punto 5): no dice que la sesión sea inválida.
 
 ---
 
@@ -1008,7 +1038,7 @@ mensaje—. Este documento no estima el costo de ninguna de las dos.
 | 2 | Diagnóstico (`/api/diagnostics`) | ✅ Verificado y consumible hoy | — |
 | 3 | Contrato de productos (`/api/products`) | ✅ Verificado en código | — |
 | 4 | Acceso real a `/api/products` | ✅ **Desbloqueado**: `JwtAuthenticationFilter` y `@EnableMethodSecurity` ya están activos; leer exige autenticación y escribir exige ADMIN (§2, ADR-011) | — |
-| 4b | Refresh reactivo ante un access token caducado en `/api/products` | ⚠️ **Abierto**: el filtro lo convierte en `401 unauthorized`, y `http.js` solo reintenta ante `invalid_session` (§1.5). Sin impacto hoy por el refresh proactivo de `session.js` | Rol 3 |
+| 4b | Refresh reactivo ante un access token caducado en `/api/products` | ✅ **Resuelto**: un `401` sobre una petición con `Bearer` —`invalid_session` o `unauthorized`— dispara un único refresh y un único reintento; sin `Bearer` se propaga tal cual (§1.5) | — |
 | 5 | Cabecera `Authorization: Bearer` | ✅ Verificado: es la que lee `JwtAuthenticationFilter` (§2.1) | — |
 | 6 | Rol del usuario | ✅ Disponible como *claim* firmado en el access token (§3.2). 🟡 Sigue propuesto exponerlo en el cuerpo de las respuestas (§6.3), como mejora no bloqueante | Rol 1 |
 | 6b | Usuarios desactivados no inician sesión ni renuevan | ✅ Verificado tras el merge (§3.2, §3.4). Cierra la pregunta 4 de §6.1 | — |

@@ -27,13 +27,24 @@
  *
  * QUÉ HACE Y QUÉ NO HACE ANTE UN 401
  * ----------------------------------
- * Ante un 401 invalid_session pide UNA renovación al proveedor inyectado y
- * reintenta la petición original UNA sola vez. Lo que NO hace es coordinar esa
- * renovación: aquí no hay refreshPromise, ni cola, ni contador de renovaciones
- * en vuelo. Si diez peticiones reciben 401 a la vez, las diez piden refresh y es
- * el proveedor quien garantiza que eso sea un solo canje del refresh token.
- * Duplicar la coordinación en los dos módulos es exactamente lo que produciría
- * dos canjes simultáneos de un token de un solo uso.
+ * Ante un 401 que llega a una petición que SALIÓ CON Authorization, y cuyo
+ * `code` es `invalid_session` o `unauthorized`, pide UNA renovación al proveedor
+ * inyectado y reintenta la petición original UNA sola vez.
+ *
+ * Los dos códigos cuentan porque el backend los emite en sitios distintos, no
+ * porque signifiquen cosas distintas para el cliente: `unauthorized` es el que
+ * llega en cualquier endpoint protegido, y `invalid_session` solo aparece en
+ * /api/auth/**. Detalle en la condición, más abajo, y en CONTRATO §1.5.
+ *
+ * Si la petición salió SIN Authorization, el 401 se propaga sin tocar la sesión:
+ * no había sesión que renovar.
+ *
+ * Lo que NO hace es coordinar esa renovación: aquí no hay refreshPromise, ni
+ * cola, ni contador de renovaciones en vuelo. Si diez peticiones reciben 401 a
+ * la vez, las diez piden refresh y es el proveedor quien garantiza que eso sea
+ * un solo canje del refresh token. Duplicar la coordinación en los dos módulos
+ * es exactamente lo que produciría dos canjes simultáneos de un token de un
+ * solo uso.
  *
  * Sigue sin haber caché ni debounce: llegan en commits posteriores.
  */
@@ -64,7 +75,8 @@ import { CATEGORY, NO_HTTP_STATUS, fromClientFailure, fromResponse, fromTranspor
  *   refresh()     -> Promise
  *       Solicita una renovación. Resuelve cuando el par nuevo YA está guardado
  *       (así el reintento lee el token nuevo con getToken()); rechaza con el
- *       error real de la renovación. Si falta, un 401 se propaga sin reintento.
+ *       error real de la renovación, que se propaga TAL CUAL al llamador. Si
+ *       falta la capacidad, un 401 se propaga sin reintento.
  *
  *   notify(event) -> void
  *       Recibe un evento observado por el transporte, hoy solo el 403. Si falta,
@@ -373,6 +385,18 @@ async function request(method, path, options = {}) {
     // ser asíncrono y su latencia no es latencia de red.
     const headers = await buildHeaders({ extraHeaders, hasJsonBody, requestId, auth });
 
+    // ¿ESTA petición salió con Authorization? Se captura AQUÍ, mirando las
+    // cabeceras que de verdad se enviaron, y no se vuelve a preguntar al
+    // proveedor más tarde: entre la salida y la respuesta puede haber ocurrido
+    // un login, un logout o un refresh, y volver a consultarlo respondería por
+    // el estado de AHORA, no por el de esta petición.
+    //
+    // No basta con `auth !== false`: una llamada a un endpoint protegido hecha
+    // sin sesión conserva el valor por defecto `auth:true`, pero getToken()
+    // devuelve null y sale SIN cabecera. Refrescar en ese caso pediría renovar
+    // una sesión que no existe.
+    const sentAuthenticated = typeof headers["Authorization"] === "string";
+
     // Un AbortController nuevo por petición, nunca reutilizado: abortar es
     // irreversible, y un controlador compartido cancelaría peticiones ajenas.
     const controller = new AbortController();
@@ -509,8 +533,34 @@ async function request(method, path, options = {}) {
         throw new HttpError(error);
     }
 
-    // 401 invalid_session: la sesión venció mientras la petición viajaba.
-    const isExpiredSession = error.httpStatus === 401 && error.code === "invalid_session";
+    // 401 sobre una petición AUTENTICADA: la sesión dejó de valer mientras la
+    // petición viajaba. Se pide UNA renovación y se reintenta UNA vez.
+    //
+    // Hay dos `code` posibles y los dos cuentan, porque el backend los produce
+    // en sitios distintos (CONTRATO §1.5):
+    //
+    //   invalid_session — lo lanza InvalidSessionException desde un controlador
+    //       de /api/auth/**, y pasa por GlobalExceptionHandler.
+    //   unauthorized    — lo escribe el authenticationEntryPoint de
+    //       SecurityConfig. Es el que llega en TODO endpoint protegido:
+    //       JwtAuthenticationFilter captura InvalidSessionException, limpia el
+    //       SecurityContext y deja seguir, con lo que la petición muere en
+    //       .anyRequest().authenticated() y nunca alcanza un controlador.
+    //
+    // Por eso mirar solo `invalid_session` dejaba a /api/products sin respaldo
+    // reactivo: un access token caducado ahí SIEMPRE llega como `unauthorized`.
+    //
+    // Y NO se puede distinguir un token vencido de uno ilegible: el filtro trata
+    // ambos igual. El cliente no decodifica el JWT para averiguarlo; pide un
+    // refresh y deja que el backend decida. Si el token era irrecuperable, el
+    // refresh fallará y ESE error es el que se propaga.
+    const AUTH_FAILURE_CODES = ["invalid_session", "unauthorized"];
+    const isExpiredSession = error.httpStatus === 401
+        && AUTH_FAILURE_CODES.includes(error.code)
+        // Sin Authorization no hubo sesión que renovar: el 401 se propaga tal
+        // cual, con su requestId, en vez de convertirse en un fallo local por
+        // ausencia de refresh token.
+        && sentAuthenticated;
     if (isExpiredSession && retryAuth && canRefresh()) {
         // Si la renovación falla, se propaga EXACTAMENTE su error, no el 401 que
         // la disparó: un 503 del refresh debe llegar al llamador como 503 con su

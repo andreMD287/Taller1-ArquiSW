@@ -309,6 +309,195 @@ test("una cabecera Authorization pasada a mano no puede suplantar al proveedor",
     }
 });
 
+/* ========= 11b. Refresh reactivo ante un 401 sobre petición autenticada ===== */
+
+/**
+ * El 401 mínimo que escribe SecurityConfig. NO trae requestId en el cuerpo: el
+ * único correlacionador es la cabecera (CONTRATO §1.5).
+ */
+const unauthorized401 = (requestId = "req-401") => makeResponse({
+    status: 401,
+    body: '{"code":"unauthorized"}',
+    headers: { "Content-Type": "application/json", "X-Request-Id": requestId }
+});
+
+/** Proveedor mínimo: un token que cambia tras renovar, y un contador de refresh. */
+function authProviderStub({ token = "viejo", onRefresh = null } = {}) {
+    const state = { token, refreshes: 0 };
+    configureAuthProvider({
+        getToken: () => state.token,
+        refresh: () => {
+            state.refreshes += 1;
+            return onRefresh
+                ? onRefresh(state)
+                : Promise.resolve().then(() => { state.token = "nuevo"; });
+        }
+    });
+    return state;
+}
+
+/**
+ * Los dos códigos con los que el backend rechaza una sesión inválida deben
+ * comportarse igual. Se prueban en tabla para no duplicar la garantía:
+ * `invalid_session` nace en un controlador de /api/auth/**, `unauthorized` en el
+ * entry point de SecurityConfig — que es el que llega en /api/products.
+ */
+for (const code of ["invalid_session", "unauthorized"]) {
+    test("401 " + code + " con Bearer: un refresh, un reintento y el token nuevo", async () => {
+        fresh();
+        const auth = authProviderStub();
+        let intentos = 0;
+        const net = installFetch(() => {
+            intentos += 1;
+            if (intentos === 1) {
+                return code === "unauthorized"
+                    ? unauthorized401("req-" + code)
+                    : makeResponse({ status: 401,
+                        body: JSON.stringify({ code, kind: "EXPECTED", requestId: "req-" + code }),
+                        headers: { "Content-Type": "application/json" } });
+            }
+            return jsonResponse(200, { ok: true });
+        });
+        try {
+            const respuesta = await get("/api/products");
+
+            assertEqual(respuesta.status, 200, "la petición original acaba bien");
+            assertEqual(auth.refreshes, 1, "exactamente UN refresh");
+            assertEqual(intentos, 2, "exactamente UN reintento");
+            assertEqual(net.calls[0].init.headers.Authorization, "Bearer viejo", "el primero llevó el token viejo");
+            assertEqual(net.calls[1].init.headers.Authorization, "Bearer nuevo",
+                "y el reintento reconstruye cabeceras con el token nuevo");
+            assert(net.calls[0].init.headers["X-Request-Id"] !== net.calls[1].init.headers["X-Request-Id"],
+                "cada intento lleva su propia correlación");
+
+            // Dos intentos HTTP reales = dos muestras. Ocultar una falsearía la medición.
+            const muestras = metrics.getSamples();
+            assertEqual(muestras.length, 2, "una muestra por intento HTTP real");
+            assertEqual(muestras[1].available, 1, "el reintento es disponible");
+            // La disponibilidad del PRIMER intento depende de si el backend
+            // etiquetó la respuesta, no de que fuera un 401: `invalid_session`
+            // pasa por GlobalExceptionHandler y trae kind EXPECTED —el sistema
+            // respondió según su especificación—, mientras que el 401 mínimo de
+            // SecurityConfig no trae kind y cuenta como no disponible.
+            assertEqual(muestras[0].available, code === "invalid_session" ? 1 : 0,
+                "disponibilidad del 401 según traiga kind o no");
+            assertEqual(muestras[0].kind, code === "invalid_session" ? "EXPECTED" : null,
+                "y el kind observado");
+        } finally { net.restore(); }
+    });
+}
+
+test("401 unauthorized SIN Authorization: se propaga tal cual, cero refresh", async () => {
+    fresh();
+    // Proveedor presente y CON capacidad de refresh, pero sin token: es el caso
+    // de una llamada protegida hecha sin sesión. `auth` conserva su valor por
+    // defecto `true`, así que mirar solo `auth !== false` no bastaría.
+    const state = { refreshes: 0 };
+    configureAuthProvider({
+        getToken: () => null,
+        refresh: () => { state.refreshes += 1; return Promise.resolve(); }
+    });
+    const net = installFetch(() => unauthorized401("req-sin-token"));
+    try {
+        const fallo = await assertRejects(get("/api/products"), "el 401 debe propagarse");
+
+        assertEqual(state.refreshes, 0, "no se pide renovar una sesión que no existe");
+        assertEqual(net.calls.length, 1, "un solo intento: sin reintento");
+        assertEqual(net.calls[0].init.headers.Authorization, undefined, "salió sin Bearer");
+        // Se propaga el 401 real, no un error local por falta de refresh token.
+        assertEqual(fallo.error.httpStatus, 401, "conserva el status");
+        assertEqual(fallo.error.code, "unauthorized", "conserva el code");
+        assertEqual(fallo.error.category, CATEGORY.UNAUTHORIZED, "y su categoría");
+        assertEqual(fallo.error.requestId, "req-sin-token", "y el requestId de la cabecera");
+    } finally { net.restore(); }
+});
+
+test("auth:false con 401: nunca refresca aunque haya token y proveedor", async () => {
+    fresh();
+    const auth = authProviderStub();
+    const net = installFetch(() => unauthorized401("req-publico"));
+    try {
+        const fallo = await assertRejects(get("/api/diagnostics", { auth: false }), "debe propagarse");
+        assertEqual(auth.refreshes, 0, "una llamada no autenticada no renueva nada");
+        assertEqual(net.calls.length, 1, "sin reintento");
+        assertEqual(net.calls[0].init.headers.Authorization, undefined, "salió sin Bearer");
+        assertEqual(fallo.error.requestId, "req-publico", "conserva el requestId");
+    } finally { net.restore(); }
+});
+
+test("segundo 401 tras el refresh: se propaga y NO hay otro refresh", async () => {
+    fresh();
+    const auth = authProviderStub();
+    const net = installFetch(() => unauthorized401("req-otra-vez"));
+    try {
+        const fallo = await assertRejects(get("/api/products"), "el segundo 401 debe propagarse");
+
+        assertEqual(auth.refreshes, 1, "una sola renovación: retryAuth:false corta el ciclo");
+        assertEqual(net.calls.length, 2, "original + un reintento, y ahí termina");
+        assertEqual(fallo.error.httpStatus, 401, "llega el 401");
+        assertEqual(fallo.error.code, "unauthorized", "con su code");
+        assertEqual(fallo.error.requestId, "req-otra-vez", "y su requestId");
+        assertEqual(metrics.getSamples().length, 2, "dos intentos reales, dos muestras");
+    } finally { net.restore(); }
+});
+
+test("si el refresh falla, se propaga EXACTAMENTE su error, no el 401 que lo disparó", async () => {
+    fresh();
+    // El refresh rechaza con un 503 propio: ese es el incidente real.
+    const errorDelRefresh = new HttpError({
+        httpStatus: 503, code: "data_unavailable", kind: "FAILURE",
+        retryable: true, requestId: "req-refresh-503", category: CATEGORY.UNAVAILABLE
+    });
+    const auth = authProviderStub({ onRefresh: () => Promise.reject(errorDelRefresh) });
+    const net = installFetch(() => unauthorized401("req-401-original"));
+    try {
+        const fallo = await assertRejects(get("/api/products"), "debe rechazar");
+
+        assertEqual(fallo, errorDelRefresh, "es el MISMO error, ni envuelto ni sustituido");
+        assertEqual(fallo.error.httpStatus, 503, "503 del refresh, no el 401");
+        assertEqual(fallo.error.requestId, "req-refresh-503", "con SU requestId, no el del 401");
+        assertEqual(auth.refreshes, 1, "se intentó renovar una vez");
+        assertEqual(net.calls.length, 1, "y no hubo reintento de la original");
+    } finally { net.restore(); }
+});
+
+test("403 access_denied nunca refresca, lleve o no Bearer", async () => {
+    fresh();
+    const auth = authProviderStub();
+    const net = installFetch(() => makeResponse({
+        status: 403,
+        body: JSON.stringify({ code: "access_denied", kind: "EXPECTED",
+            message: "No tiene permisos", retryable: false, requestId: "req-403" }),
+        headers: { "Content-Type": "application/json", "X-Request-Id": "req-403" }
+    }));
+    try {
+        const fallo = await assertRejects(post("/api/products", { body: {} }), "el 403 se propaga");
+        assertEqual(auth.refreshes, 0, "un 403 no dice que la sesión sea inválida");
+        assertEqual(net.calls.length, 1, "sin reintento");
+        assertEqual(fallo.error.code, "access_denied", "conserva el code");
+    } finally { net.restore(); }
+});
+
+test("un 401 solo dispara refresh por 401: otros fallos HTTP se propagan intactos", async () => {
+    for (const [status, code] of [[400, "validation_error"], [404, "product_not_found"],
+                                  [409, "user_already_exists"], [500, "internal_error"],
+                                  [503, "data_unavailable"]]) {
+        fresh();
+        const auth = authProviderStub();
+        const net = installFetch(() => makeResponse({
+            status,
+            body: JSON.stringify({ code, kind: "EXPECTED", requestId: "req-" + status }),
+            headers: { "Content-Type": "application/json" }
+        }));
+        try {
+            const fallo = await assertRejects(get("/api/products"), status + " debe propagarse");
+            assertEqual(auth.refreshes, 0, status + ": no renueva");
+            assertEqual(net.calls.length, 1, status + ": sin reintento");
+            assertEqual(fallo.error.code, code, status + ": conserva el code");
+        } finally { net.restore(); }
+    }
+});
+
 /* ======================= 12. La URL viene de config ======================== */
 
 test("la URL base sale solo de config.js y no se duplican barras", async () => {

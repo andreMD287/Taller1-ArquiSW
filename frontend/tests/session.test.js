@@ -157,27 +157,38 @@ test("sesión 5: token vencido con claim ADMIN no autentica ni da rol", async ()
 
 /* ============================ Coordinación ============================== */
 
-test("sesión 6: dos 401 invalid_session simultáneos causan un solo /refresh", async () => {
-    fresh();
-    const inicial = pair();
-    const renovado = pair({ refreshToken: "refresh-2" });
-    let refreshCalls = 0;
-    const net = installFetch((url) => {
-        if (url.includes("/api/auth/login")) return jsonResponse(200, inicial);
-        if (url.includes("/api/auth/refresh")) { refreshCalls++; return jsonResponse(200, renovado); }
-        // /api/products: 401 la primera vez para cada una, 200 en el reintento
-        return net.calls.filter((c) => c.url.includes("/api/products")).length <= 2
-            ? errorResponse(401, { code: "invalid_session" })
-            : jsonResponse(200, { ok: true });
+/**
+ * Los dos códigos que el backend usa para "esta sesión ya no vale" se prueban en
+ * tabla, no en dos pruebas gemelas: `invalid_session` sale de un controlador de
+ * /api/auth/**, y `unauthorized` del entry point de SecurityConfig, que es el
+ * que llega en CUALQUIER endpoint protegido cuando el access token caducó
+ * (JwtAuthenticationFilter limpia el contexto y la petición muere en
+ * .anyRequest().authenticated()). La coordinación de refresh vive aquí, en
+ * session.js: http.js pide renovar sin coordinar.
+ */
+for (const code of ["invalid_session", "unauthorized"]) {
+    test("sesión 6 [" + code + "]: dos 401 simultáneos causan un solo /refresh", async () => {
+        fresh();
+        const inicial = pair();
+        const renovado = pair({ refreshToken: "refresh-2" });
+        let refreshCalls = 0;
+        const net = installFetch((url) => {
+            if (url.includes("/api/auth/login")) return jsonResponse(200, inicial);
+            if (url.includes("/api/auth/refresh")) { refreshCalls++; return jsonResponse(200, renovado); }
+            // /api/products: 401 la primera vez para cada una, 200 en el reintento
+            return net.calls.filter((c) => c.url.includes("/api/products")).length <= 2
+                ? errorResponse(401, { code })
+                : jsonResponse(200, { ok: true });
+        });
+        try {
+            await loginOk();
+            const [a, b] = await Promise.all([get("/api/products"), get("/api/products")]);
+            assertEqual(a.status, 200, "la primera se recupera");
+            assertEqual(b.status, 200, "la segunda también");
+            assertEqual(refreshCalls, 1, "un ÚNICO canje del refresh token");
+        } finally { net.restore(); }
     });
-    try {
-        await loginOk();
-        const [a, b] = await Promise.all([get("/api/products"), get("/api/products")]);
-        assertEqual(a.status, 200, "la primera se recupera");
-        assertEqual(b.status, 200, "la segunda también");
-        assertEqual(refreshCalls, 1, "un ÚNICO canje del refresh token");
-    } finally { net.restore(); }
-});
+}
 
 test("sesión 7: refresh proactivo en vuelo más dos 401 comparten un único /refresh", async () => {
     fresh();
