@@ -16,6 +16,7 @@ Practice* (Bass, Clements & Kazman, 4.ª ed.).
 |---|---|
 | **[Documento de arquitectura](backend/docs/documentacion-arquitectura.md)** | **El entregable principal.** Escenarios de calidad, las cuatro vistas arquitectónicas, 12 ADR, taxonomía de fallas, tácticas de los Cap. 4 y 5, análisis cuantitativo de disponibilidad y plan de experimentos |
 | [Decisiones de Taller 2](docs/DECISIONS.md) | ADR de modificabilidad: estructura de módulos, motor de reglas, validaciones, *feature toggles*, DTOs y manejo de excepciones |
+| [Ejercicio de modificabilidad](docs/EJERCICIO-MODIFICABILIDAD.md) | Guion reproducible que verifica el escenario ESC-M1 cronometrando el costo real de agregar un atributo y su regla |
 | [Guía de uso](backend/GUIA-DE-USO.md) | Cómo levantar el sistema, usar cada endpoint y reproducir los experimentos |
 | [Detalle del backend](backend/README.md) | Arranque, endpoints y estructura del tier de lógica |
 | [Evidencia cruda](backend/docs/evidencia/) | CSV y logs de las corridas de caos y de las sondas de disponibilidad |

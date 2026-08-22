@@ -313,6 +313,61 @@ tuvo una dependencia que degradar (ver ADR-08).
 | **Medida** | Cambio efectivo en ≤ 1 min; **0 recompilaciones**; el artefacto binario no cambia |
 | **Verificado** | Estructural — el mecanismo es el mismo de v1.0, sin cambios |
 
+### 4.3 Escenarios de modificabilidad (Cap. 8)
+
+Atributo central del Taller 2. Las decisiones que lo sustentan están en
+[`docs/DECISIONS.md`](../../docs/DECISIONS.md) y su priorización de tácticas en §13.3.
+
+#### ESC-M1 — Agregar un atributo con su regla de negocio a `Producto`
+
+| Parte | Valor |
+|---|---|
+| **Fuente** | Un desarrollador del equipo |
+| **Estímulo** | Se solicita agregar un atributo nuevo a `Producto` junto con una regla de negocio que lo valide |
+| **Artefacto** | Módulo de productos (`com.taller.auth.product`), su descriptor en el tier de presentación (`frontend/src/resources/products.js`) y el esquema |
+| **Entorno** | Tiempo de diseño, sobre el código fuente. No requiere detener el servicio |
+| **Respuesta** | El atributo queda disponible en la API y en la interfaz; la regla se aplica en alta y edición, respondiendo `422` con el campo señalado; **ninguna regla existente cambia de comportamiento** |
+| **Medida de respuesta** | **≤3 módulos** tocados · **0 archivos existentes modificados en el motor de reglas** · **0 archivos del módulo de usuarios o de autenticación** · **<3 horas** · **0 defectos nuevos**: la suite completa pasa sin modificar ningún test existente |
+| **Verificado** | **Pendiente de ejecutar.** El guion reproducible está en [`docs/EJERCICIO-MODIFICABILIDAD.md`](../../docs/EJERCICIO-MODIFICABILIDAD.md); las cifras de arriba son el objetivo, no una medición. Se completará con los valores reales al correrlo |
+
+**Qué significa "≤3 módulos" aquí.** Un módulo es una unidad con dueño y frontera
+propia, del tamaño de *productos* / *usuarios* / *presentación* — no un paquete de capa.
+Es la granularidad que el propio escenario usa al afirmar que no se toca el módulo de
+usuarios. Los tres son: el módulo de productos del backend, el descriptor del tier de
+presentación, y el esquema.
+
+**La medida que de verdad prueba la táctica** no es el conteo de módulos sino la segunda:
+**la regla nueva es un archivo nuevo y no modifica ninguno existente**. Es la consecuencia
+directa de ADR-003 (*defer binding*): Spring descubre las reglas por implementar la
+interfaz, así que no hay registro, ni enum, ni `switch` que actualizar. Si algún día
+agregar una regla obliga a editar un archivo previo, la táctica se rompió aunque el
+conteo de módulos siga dando 3.
+
+**Por qué el frontend sí aparece, y por qué no es un fallo.** La versión original del
+escenario afirmaba que no había que tocarlo. Con el diseño del tier de presentación eso
+dejó de ser cierto: hay que añadir una entrada al descriptor del recurso. Pero ese archivo
+es **datos, no comportamiento** — no llama a la API, no toca el DOM, no implementa
+reglas — y **ningún otro archivo del frontend cambia**: ni el motor de CRUD, ni la
+plataforma, ni las vistas. Declararlo es más honesto que excluirlo del alcance, y el
+resultado sigue siendo fuerte.
+
+#### ESC-M2 — Desactivar una regla de negocio sin desplegar
+
+| Parte | Valor |
+|---|---|
+| **Fuente** | Un operador del sistema |
+| **Estímulo** | Una regla de negocio recién introducida debe desactivarse en producción |
+| **Artefacto** | Motor de reglas de producto |
+| **Entorno** | Tiempo de configuración, con el sistema desplegado |
+| **Respuesta** | La regla deja de evaluarse; el resto sigue aplicándose sin cambios |
+| **Medida de respuesta** | **0 archivos modificados** y **0 recompilaciones**: basta cambiar `features.rules.<nombre>` y reiniciar el servicio. La regla desactivada **no llega a instanciarse**, así que su costo en ejecución es cero |
+| **Verificado** | `ProductRuleDiscoveryTest.laMismaReglaSeActivaSoloCambiandoUnaPropiedadSinRecompilar` |
+
+Es *defer binding* a tiempo de configuración (ADR-005). El mismo artefacto compilado se
+comporta distinto según el entorno. Las reglas centrales —precio > 0, stock ≥ 0— **no**
+son desactivables a propósito: son invariantes del negocio, no funcionalidad en despliegue
+progresivo.
+
 ---
 
 ## 5. Vistas arquitectónicas

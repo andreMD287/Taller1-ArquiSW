@@ -516,23 +516,62 @@ alguna respuesta de error de Taller 1 cambiara de forma.
 
 ---
 
-## Nota abierta — granularidad de "módulo" en el escenario de modificabilidad
+## ADR-016 — Granularidad de "módulo" y medida de respuesta del escenario
 
-El ejercicio "agregar un atributo + una regla a `Producto`" toca, como mínimo,
-tres paquetes: `product/domain` (el atributo), `product/api` (los dos records y
-el mapper) y `product/application/rules` (la regla). Si "módulo" significa
-*paquete de capa*, la medida de respuesta de ≤2 módulos **no se cumple**, y no
-hay diseño razonable que la cumpla: un atributo que no aparece en la API no le
-sirve a nadie.
+**Fecha:** 2026-08-22
+**Estado:** Aceptada — cierra la nota que quedaba abierta
 
-La salida no es cambiar el diseño sino **fijar la granularidad de "módulo"** al
-redactar el escenario de 6 partes. El propio enunciado ya la insinúa cuando dice
-*"no requiere tocar el frontend ni el módulo de usuarios"*: ahí "módulo" es del
-tamaño de **frontend / usuarios / productos**, no de un paquete de capa. Con esa
-lectura el ejercicio toca **1 módulo** y la afirmación interesante —que no se
-toca ni el módulo de usuarios ni el frontend— queda demostrada.
+### El problema
 
-**Pendiente de cerrar** al redactar el entregable 3.
+La formulación original del escenario pedía *"≤2 módulos, sin tocar el frontend
+ni el módulo de usuarios"*, pero nunca definía qué cuenta como módulo. Con
+"módulo = paquete de capa" la medida es inalcanzable por diseño: un atributo que
+no aparece en la API no le sirve a nadie, así que como mínimo cambian `domain` y
+`api`. Y la parte de "sin tocar el frontend" **dejó de ser cierta** cuando el
+tier de presentación pasó a describir sus recursos con descriptores: agregar un
+atributo obliga a añadir una entrada en `frontend/src/resources/products.js`.
+
+### Decisión
+
+1. **Un módulo es una unidad con dueño y frontera propia** —del tamaño de
+   *productos* / *usuarios* / *presentación*—, no un paquete de capa. Es la
+   granularidad que el propio enunciado usa al hablar del "módulo de usuarios".
+2. La medida de respuesta pasa a **≤3 módulos**: el módulo de productos del
+   backend, el descriptor del tier de presentación y el esquema.
+3. Se agrega una medida que es la que **de verdad prueba la táctica**:
+   **0 archivos existentes modificados en el motor de reglas**.
+
+### Razón
+
+Subir de 2 a 3 no es relajar la medida para que dé: es reconocer que el sistema
+tiene tres tiers y que un atributo de negocio los atraviesa. Lo que se gana a
+cambio es una medida que sí discrimina.
+
+El conteo de módulos es un mal indicador de modificabilidad por sí solo —se
+puede bajar agrupando código, que es justo lo contrario de lo que se quiere—.
+La segunda medida no se puede falsear: **agregar una regla no modifica ningún
+archivo previo**, consecuencia directa del *defer binding* de ADR-003. Si algún
+día alguien introduce un registro central de reglas, el conteo de módulos
+seguiría dando 3 y esta medida se rompería de inmediato.
+
+### Sobre el frontend
+
+Se declara explícitamente que el descriptor cambia, en vez de excluirlo del
+alcance para conservar la cifra original. El resultado sigue siendo fuerte: ese
+archivo es **datos, no comportamiento** —sin `fetch`, sin DOM, sin reglas— y
+**ningún otro archivo del frontend cambia**: ni el motor de CRUD, ni la
+plataforma, ni las vistas.
+
+### Táctica del Cap. 8 aplicada
+
+Ninguna nueva: esta ADR no cambia el diseño, define cómo se mide. Se registra
+porque la medida de respuesta es parte del escenario y cambiarla sin dejar
+rastro sería ajustar la vara después de conocer el resultado.
+
+### Dónde queda
+
+Escenarios **ESC-M1** y **ESC-M2** en §4.3 del documento de arquitectura; guion
+reproducible en [`EJERCICIO-MODIFICABILIDAD.md`](EJERCICIO-MODIFICABILIDAD.md).
 
 ---
 
