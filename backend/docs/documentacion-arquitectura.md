@@ -164,10 +164,17 @@ la Fase 4 (HA de Postgres) se implementó como MVP con limitaciones documentadas
 | 5 | Desempeño | Se mide (p95); en Taller 2 pasa a tener objetivo explícito (<2 s) |
 
 **Ampliación del Taller 2.** El alcance original priorizaba dos atributos; el Taller 2 suma
-cuatro con tratamiento propio: **modificabilidad** (priorización de tácticas en §13.3,
-decisiones en [`docs/DECISIONS.md`](../../docs/DECISIONS.md)), **safety**, **rendimiento**
-(<2 s) y **eficiencia energética**. La modificabilidad ascendió de "habilitador" a objeto
-de estudio; los otros tres se documentan en sus entregables respectivos.
+cuatro con tratamiento propio:
+
+| Atributo | Escenarios | Tácticas y priorización |
+|---|---|---|
+| **Modificabilidad** (Cap. 8) | §4.3 | §13.3 — decisiones en [`docs/DECISIONS.md`](../../docs/DECISIONS.md) |
+| **Safety** (Cap. 10) | §4.4 | §13.4 |
+| **Rendimiento** (<2 s) | *pendiente* | *pendiente* |
+| **Eficiencia energética** | *pendiente* | *pendiente* |
+
+La modificabilidad ascendió de "habilitador" a objeto de estudio. Los dos pendientes se
+documentan junto con las mediciones que los sustentan, que aún no se han ejecutado.
 
 ---
 
@@ -367,6 +374,70 @@ Es *defer binding* a tiempo de configuración (ADR-005). El mismo artefacto comp
 comporta distinto según el entorno. Las reglas centrales —precio > 0, stock ≥ 0— **no**
 son desactivables a propósito: son invariantes del negocio, no funcionalidad en despliegue
 progresivo.
+
+### 4.4 Escenarios de safety (Cap. 10)
+
+*Safety* no es lo mismo que seguridad. La seguridad se ocupa de un **adversario**;
+el safety se ocupa de que el sistema **no pueda entrar en un estado del que no haya
+salida**, sea por un ataque, por un error honesto o por una carrera entre dos operaciones
+legítimas. Los tres escenarios de abajo son de esa segunda clase.
+
+#### ESC-S1 — Dos operaciones concurrentes intentan dejar el sistema sin administradores
+
+| Parte | Valor |
+|---|---|
+| **Fuente** | Dos administradores distintos, actuando a la vez |
+| **Estímulo** | Ambos ejecutan simultáneamente una operación que reduce el número de administradores: darse de baja, o degradarse a USER |
+| **Artefacto** | `UserService`, tabla `users` |
+| **Entorno** | Operación normal, dos transacciones concurrentes contra PostgreSQL |
+| **Respuesta** | Una de las dos prospera; la otra se rechaza con `409 last_admin_protected`. **El sistema conserva al menos un administrador activo en todo momento** |
+| **Medida de respuesta** | **0 ocurrencias** de "cero administradores activos" bajo ejecución concurrente |
+| **Verificado** | `LastAdminConcurrencyIT`, contra PostgreSQL real |
+
+**Por qué este escenario existe.** Si el invariante se violara, **no habría salida por la
+interfaz**: solo un ADMIN puede asignar el rol ADMIN, así que recuperar el sistema exigiría
+editar la base de datos a mano. Es la definición de un estado inseguro — no uno incorrecto,
+sino uno *del que no se puede volver*.
+
+**Por qué un conteo no bastaba.** Con el aislamiento por defecto (`READ_COMMITTED`), las
+dos transacciones leerían *"hay 2 admins"*, ambas concluirían que pueden proceder, y el
+resultado sería 0. Se resuelve con `SELECT ... FOR UPDATE` sobre los administradores
+activos antes de comprobar, dentro de la misma transacción que muta (ADR-015).
+
+#### ESC-S2 — Un dato que viola un invariante intenta llegar a la base
+
+| Parte | Valor |
+|---|---|
+| **Fuente** | Un cliente de la API, o una ruta de código futura que no pase por el motor de reglas |
+| **Estímulo** | Se intenta persistir un producto con `stock < 0` o `price <= 0`, o un usuario con un rol inexistente |
+| **Artefacto** | Motor de reglas, constraints de las tablas `products` y `users` |
+| **Entorno** | Operación normal |
+| **Respuesta** | El motor de reglas rechaza con `422` señalando el campo. Si la operación llegara por una ruta que se salte el motor, la constraint de la base aborta la transacción y el servicio traduce el fallo al mismo `422` |
+| **Medida de respuesta** | **0 filas** en la base que violen un invariante, por cualquier camino |
+| **Verificado** | `ProductRulesTest`, `ProductServiceTest.unaCarreraPerdidaContraLaConstraintSeTraduceAlMismo422YNoAUn500`, y las constraints `ck_products_stock_non_negative`, `ck_products_price_positive`, `ck_users_role`, `ck_users_failed_attempts` |
+
+**La duplicación es deliberada.** El backend produce el *mensaje* útil para el usuario; la
+constraint garantiza el *invariante* aunque el mensaje nunca se ejecute. Es la diferencia
+entre **validar** y **no poder violar**: la primera barrera puede tener un agujero, la
+segunda es la que hace que el agujero no importe.
+
+#### ESC-S3 — Un usuario sin privilegios intenta escalar a administrador
+
+| Parte | Valor |
+|---|---|
+| **Fuente** | Un usuario autenticado con rol USER |
+| **Estímulo** | Invoca `PATCH /api/users/{id}/role` para asignarse el rol ADMIN, o intenta escribir en el catálogo de productos |
+| **Artefacto** | `UserController`, `ProductController`, `SecurityConfig` |
+| **Entorno** | Operación normal, con un token válido |
+| **Respuesta** | `403 Forbidden`. La operación no llega al servicio |
+| **Medida de respuesta** | **0 cambios de rol** originados por un usuario no administrador |
+| **Verificado** | `ProductSecurityIT` |
+
+**Por qué el rol viaja en un endpoint propio.** Si `role` fuera un campo del `PUT` de
+perfil, la autorización tendría que depender de *qué campos trae el cuerpo* — *"puedes
+editarte a ti mismo, salvo este campo"*. Ese condicional es donde se cuelan las escaladas de
+privilegio: basta olvidar una rama, o que alguien agregue un campo sin revisar la condición.
+Separados, cada endpoint tiene **una sola regla, sin ramas** (ADR-014).
 
 ---
 
@@ -1477,7 +1548,8 @@ para que una sonda por sí sola tuviera significancia estadística sobre un pres
 Formato del Capítulo 3: para cada táctica, si está soportada, la decisión de diseño y su
 ubicación. Se agrega la **priorización**, porque el catálogo del libro es deliberadamente
 exhaustivo y aplicarlo entero no es una meta: el Cap. 4 lista 25 tácticas de
-disponibilidad, el Cap. 5 nueve de desplegabilidad y el Cap. 8 ocho de modificabilidad.
+disponibilidad, el Cap. 5 nueve de desplegabilidad, el Cap. 8 ocho de modificabilidad y
+el Cap. 10 dieciséis de safety.
 Adoptarlas todas multiplicaría piezas que operar sin mover las medidas de respuesta, y
 varias son directamente inaplicables a este dominio.
 
@@ -1542,7 +1614,7 @@ verificada. Las cuatro P2 comparten un patrón: están implementadas *con un lí
 —Retry solo en idempotentes, Escalating Restart solo hasta la caída de contenedor— y ese
 límite es la decisión, no un descuido. Las seis P3 se reparten en dos grupos: cinco
 inaplicables al dominio y **una sola descartada por costo teniendo riesgo alto**
-(Predictive Model), que por eso mismo aparece como R-1 en §13.4.
+(Predictive Model), que por eso mismo aparece como R-1 en §13.5.
 
 ### 13.2 Desplegabilidad (Cap. 5)
 
@@ -1590,7 +1662,62 @@ Los dos últimos son el caso interesante: son tácticas del catálogo que, aplic
 sistema, **empeorarían** la medida de respuesta. Es la mejor evidencia de que la
 priorización no puede hacerse leyendo el catálogo, sino contra el escenario concreto.
 
-### 13.4 Riesgos altos detectados
+### 13.4 Safety (Cap. 10)
+
+El Capítulo 10 agrupa sus tácticas en tres familias según **cuándo** actúan respecto al
+estado inseguro: evitarlo, detectarlo, o contener su daño.
+
+**Una observación que conviene tener lista para la sustentación:** varios nombres se repiten
+entre el Cap. 4 y el Cap. 10 —*Timeout*, *Sanity Checking*, *Condition Monitoring*,
+*Redundancy*, *Rollback*, *Degradation*—. No es una duplicación del libro: es el **mismo
+mecanismo sirviendo a dos atributos por razones distintas**. Un `CHECK (stock >= 0)` aporta
+a la disponibilidad porque evita un estado que haría fallar consultas posteriores, y aporta
+al safety porque impide que exista un inventario negativo. La táctica es una; la
+justificación, dos.
+
+#### Evitar el estado inseguro
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| Substitution | **No** | B | A | B | **P3** | Sustituir software por protección física o mecánica. No aplica a un sistema de gestión sin actuadores |
+| Predictive Model | **No** | B | A | M | **P3** | Exigiría histórico y umbrales calibrados que no existen. Mismo descarte que en disponibilidad (R-1) |
+
+#### Detectar el estado inseguro
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| **Sanity Checking** | Sí | A | B | A | **P1** | Doble barrera: motor de reglas (`precio > 0`, `stock >= 0`, unicidad) **y** constraints `ck_products_price_positive`, `ck_products_stock_non_negative`, `ck_users_role`, `ck_users_failed_attempts`. Ver ESC-S2 |
+| Condition Monitoring | Sí | A | B | A | **P1** | `DataTierHealthIndicator`; `repmgrd` vigila al primario |
+| Timeout | Sí | A | B | A | **P1** | `connection-timeout: 1000` y `validation-timeout: 1000` de Hikari; `proxy_read_timeout 8s` en nginx. Una operación colgada indefinidamente es un estado inseguro: retiene conexiones del pool |
+| Timestamp | Sí | M | B | M | **P2** | `exp` del JWT y `expiresAt` del refresh token: detectan estado caducado |
+| Comparison | **No** | B | A | B | **P3** | Exige réplicas que calculen lo mismo y comparen resultados. Las réplicas aquí atienden peticiones distintas |
+
+#### Contener el daño
+
+| Táctica | ¿Soportada? | Imp. | Costo | Riesgo si se omite | **Prioridad** | Decisión y ubicación |
+|---|---|---|---|---|---|---|
+| **Interlock** | Sí | A | M | **A** | **P1** | **La táctica central de este atributo.** El último ADMIN activo no puede darse de baja ni degradarse: `findActiveByRoleForUpdate` con `PESSIMISTIC_WRITE` dentro de la transacción que muta (ADR-015, ESC-S1) |
+| **Barrera / Firewall** | Sí | A | B | **A** | **P1** | RBAC con `@PreAuthorize` y `@EnableMethodSecurity`; filtro JWT; CORS restringido a orígenes concretos —ya no `"*"`—; rol y contraseña en endpoints propios para que la autorización no dependa del cuerpo (ADR-014, ESC-S3) |
+| **Abort** | Sí | A | B | A | **P1** | Toda operación de escritura vive en una `@Transactional`: una violación de invariante aborta la transacción completa y no deja escritura parcial |
+| Limit Consequences | Sí | A | B | A | **P1** | Borrado **lógico**: ninguna fila se elimina, así que ningún borrado es irreversible. Bloqueo por intentos fallidos (`LockoutPolicy`). TTL corto del access token, que acota la ventana de un token robado |
+| Redundancy | Sí | A | M | A | **P1** | 2 réplicas de `web`, 3 de `backend`, 3 nodos de Postgres con `repmgr` |
+| Rollback | Sí | A | B | A | **P1** | `@Transactional` a nivel de operación; `docker service rollback` a nivel de despliegue |
+| Repair State | Sí | M | M | M | **P2** | El nodo de Postgres divergente se re-clona con `pg_basebackup` tras vaciar su volumen (ADR-11). Reparación manual guionada, no automática |
+| Degradation | Sí | M | B | M | **P2** | El circuit breaker degrada a `503 data_unavailable` en vez de propagar la falla; `logout` responde `202` en modo *best-effort* |
+| Masking | **No** | B | A | B | **P3** | Exigiría votación entre réplicas para enmascarar el resultado de una defectuosa. Mismo motivo que *Comparison* |
+
+**Lectura.** De las 16 tácticas, **9 son P1**, 3 son P2 y 4 se descartaron. Las cuatro
+descartadas comparten causa: *Substitution*, *Comparison* y *Masking* presuponen redundancia
+que calcula lo mismo —control industrial, aviónica—, y no hay nada de eso en un CRUD
+transaccional. *Predictive Model* es la única descartada por costo y no por inaplicabilidad,
+y ya figura como R-1.
+
+**La táctica que define el atributo es el Interlock**, y es la única con costo M entre las
+P1: cuesta un bloqueo pesimista que serializa operaciones. Por eso se toma **solo** cuando
+la operación puede reducir el número de administradores; dar de baja a un USER o promover
+USER→ADMIN no lo toman, porque serializar sin invariante que proteger es puro costo.
+
+### 13.5 Riesgos altos detectados
 
 **R-1 (Alto) — Ausencia de Predictive Model.** Sin cambios respecto a v1.0: el sistema
 solo reacciona a fallas consumadas, no hay detección de tendencias.
