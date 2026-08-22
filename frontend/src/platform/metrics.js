@@ -7,7 +7,7 @@
  * disponibilidad ni latencia percibidas por el cliente sin medirlas donde el
  * cliente está. El backend mide lo que él ve; este módulo mide lo que ve el
  * navegador, que incluye la red, el timeout del cliente y los rechazos que
- * nunca llegan a un controlador (el 403 vacío de la cadena de seguridad).
+ * nunca llegan a un controlador (el 401 de la cadena de seguridad).
  *
  * Guarda UNA muestra por cada intento HTTP real. No agrega, no promedia y no
  * descarta nada al registrar: agregar es responsabilidad de report().
@@ -24,8 +24,13 @@
  *     especificación; una regla de negocio incumplida no es una caída (Cap. 4,
  *     y ADR-007 del backend, que la clasifica como EXPECTED precisamente para
  *     que no cuente contra la disponibilidad).
- *   - 403 vacío es NO DISPONIBLE: no trae kind, y desde el cliente es una
- *     operación que no se pudo completar.
+ *   - Un 403 SIN kind es NO DISPONIBLE: sin esa etiqueta, desde el cliente solo
+ *     consta una operación que no se pudo completar. Ojo: el 403 vigente de
+ *     `@PreAuthorize` SÍ trae `kind: "EXPECTED"` porque pasa por
+ *     GlobalExceptionHandler, así que cuenta como DISPONIBLE — y es lo
+ *     correcto: rechazar a un USER una escritura de ADMIN es el sistema
+ *     funcionando según su especificación, no una caída. La rama sin kind
+ *     sigue viva para un cuerpo vacío o truncado.
  *   - timeout y error de red son NO DISPONIBLES (httpStatus "000").
  *
  * RELACIÓN CON backend/scripts/probe.sh — LEER ANTES DE CONCATENAR RESULTADOS

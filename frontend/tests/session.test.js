@@ -328,7 +328,7 @@ test("sesión 15 y 16: refresh con 503 conserva estado, propaga el mismo error y
     } finally { net.restore(); }
 });
 
-test("sesión 17: un 403 vacío emite session:forbidden, conserva la sesión y el requestId", async () => {
+test("sesión 17: un 403 sin cuerpo emite session:forbidden, conserva la sesión y el requestId", async () => {
     fresh();
     const net = installFetch((url) => url.includes("/api/auth/login")
         ? jsonResponse(200, pair())
@@ -338,7 +338,7 @@ test("sesión 17: un 403 vacío emite session:forbidden, conserva la sesión y e
         const bus = events();
         const failure = await assertRejects(get("/api/products"), "el 403 debe propagarse");
         assertEqual(failure.error.category, CATEGORY.FORBIDDEN, "categoría forbidden");
-        assertEqual(failure.error.code, null, "el 403 vacío no trae code");
+        assertEqual(failure.error.code, null, "un 403 sin cuerpo no trae code, y no se inventa");
         assertEqual(bus.types().join(), "session:forbidden", "emite session:forbidden");
         assertEqual(bus.received[0].requestId, "req-403", "conserva el requestId de la cabecera");
         assertEqual(session.isAuthenticated(), true, "NO cierra la sesión");

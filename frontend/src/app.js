@@ -12,20 +12,34 @@
  * y nunca al revés: `crud/` no importa recursos, y `platform/` no importa ni
  * CRUD ni recursos (ADR-F01, ADR-F02).
  *
- * ESTADO DEL BACKEND, HOY — LEER ANTES DE DEPURAR UN 403
- * -----------------------------------------------------
- * `SecurityConfig` declara `@EnableWebSecurity` SIN `@EnableMethodSecurity`, y
- * el único filtro registrado es `RequestIdFilter`: no existe ningún filtro que
- * traduzca el JWT en un `Authentication`. Con `.anyRequest().authenticated()`,
- * eso significa que **`/api/products` responde 403 a todo el mundo, incluso con
- * un access token válido**, y que los `@PreAuthorize("hasRole('ADMIN')")` de
- * `ProductController` están inertes. No es un defecto de esta composición: es
- * una pieza pendiente del backend. Cuando llegue, esto funcionará sin cambios.
+ * AUTORIZACIÓN DEL BACKEND — ESTADO VERIFICADO
+ * --------------------------------------------
+ * Verificado leyendo `SecurityConfig`, `JwtAuthenticationFilter`,
+ * `ProductController` y `ProductSecurityIT`, y ejercitando el backend real:
  *
- * Lo que sí cambió: el JWT ya lleva un claim `role` firmado, así que el frontend
- * SÍ puede leer el rol —`session.role()`— para adaptar la presentación. Eso no
- * es seguridad: la frontera de autorización sigue siendo el backend, y un 403
- * se maneja igual aunque la interfaz haya ocultado el botón.
+ *   - `JwtAuthenticationFilter` valida el access token y, si es válido,
+ *     construye el `Authentication` de la petición.
+ *   - El claim firmado `role` se traduce a la authority `ROLE_USER` o
+ *     `ROLE_ADMIN`.
+ *   - `@EnableMethodSecurity` está activo, así que los
+ *     `@PreAuthorize("hasRole('ADMIN')")` de `ProductController` SÍ se aplican.
+ *   - Leer `/api/products` requiere estar autenticado.
+ *   - `POST`, `PUT` y `DELETE` requieren ADMIN.
+ *
+ * QUÉ SIGNIFICA ESO PARA ESTA COMPOSICIÓN — Y QUÉ NO
+ * --------------------------------------------------
+ * Que el frontend lea `session.role()` para ocultar acciones de escritura NO es
+ * seguridad: es adaptación visual. La frontera de autorización sigue estando en
+ * el backend, que vuelve a comprobar el rol en cada petición. Ocultar el botón
+ * evita un rechazo previsible; no evita nada si alguien llama al API por su
+ * cuenta. Por eso un 403 se sigue manejando —informar sin cerrar sesión—
+ * aunque la interfaz creyera que la operación era imposible.
+ *
+ * Las dos respuestas de seguridad NO tienen la misma forma (§1.5 del contrato):
+ * el 401 de `SecurityConfig` es el JSON mínimo `{"code":"unauthorized"}` y el
+ * 403 de `@PreAuthorize` pasa por `GlobalExceptionHandler` con un
+ * `ErrorResponse` completo. Esta composición no depende de esa diferencia
+ * porque solo consume el modelo normalizado de `platform/errors.js`.
  */
 
 import { config } from "../config.js";
@@ -451,7 +465,8 @@ export function start(options = {}) {
         }
         if (event.type === "session:forbidden") {
             // No se cierra sesión y no se refresca: un 403 no dice que la sesión
-            // sea inválida.
+            // sea inválida, dice que ESTA operación excede el rol. El caso vivo
+            // es un USER autenticado sobre una escritura reservada a ADMIN.
             notify("El servidor rechazó la operación por falta de permisos.", event.requestId);
             return;
         }

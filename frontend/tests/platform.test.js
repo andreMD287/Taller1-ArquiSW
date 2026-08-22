@@ -121,9 +121,20 @@ test("422 ErrorResponse: kind EXPECTED, available=1 y violaciones indexadas por 
     }
 });
 
-/* ==================== 5. 403 vacío de Spring Security ====================== */
+/* ============ 5. 403 sin cuerpo: robustez del cliente HTTP ================= */
 
-test("403 vacío: sin parsear, code null, category forbidden, requestId de cabecera, available=0", async () => {
+/**
+ * ESTO YA NO ES EL COMPORTAMIENTO ACTUAL DEL BACKEND. Hoy un 403 sobre una
+ * escritura pasa por GlobalExceptionHandler y llega con un ErrorResponse
+ * completo (`code: "access_denied"`, `kind: "EXPECTED"`, `message`, `requestId`),
+ * y el accessDeniedHandler de SecurityConfig produce al menos
+ * `{"code":"access_denied"}`. La prueba se conserva porque sigue siendo válida
+ * como prueba de ROBUSTEZ: un proxy, un cuerpo truncado o un 204 pueden dejar
+ * al cliente sin JSON, y en ese caso no debe fabricar un `code` ni perder el
+ * requestId de la cabecera. Fija una garantía del cliente, no un contrato del
+ * servidor.
+ */
+test("403 sin cuerpo (robustez, no el caso actual): code null, category forbidden, requestId de cabecera, available=0", async () => {
     fresh();
     const net = installFetch(() => makeResponse({
         status: 403,
@@ -430,7 +441,11 @@ test("los timeouts entran en los percentiles y no se ocultan", () => {
 test("la regla de disponibilidad es única y cubre 2xx, EXPECTED y el resto", () => {
     assertEqual(metrics.isAvailable({ httpStatus: 204 }), 1, "204 disponible");
     assertEqual(metrics.isAvailable({ httpStatus: 422, kind: "EXPECTED" }), 1, "422 EXPECTED disponible");
-    assertEqual(metrics.isAvailable({ httpStatus: 403 }), 0, "403 vacío no disponible");
+    assertEqual(metrics.isAvailable({ httpStatus: 403 }), 0, "403 SIN kind no disponible");
+    // El 403 vigente de @PreAuthorize pasa por GlobalExceptionHandler y trae
+    // kind EXPECTED: negar permisos es el sistema cumpliendo su especificación.
+    assertEqual(metrics.isAvailable({ httpStatus: 403, kind: "EXPECTED" }), 1,
+        "403 access_denied con kind EXPECTED sí disponible");
     assertEqual(metrics.isAvailable({ httpStatus: "000" }), 0, "sin respuesta no disponible");
     assertEqual(metrics.isAvailable({ httpStatus: 503, kind: "FAILURE" }), 0, "FAILURE no disponible");
 });

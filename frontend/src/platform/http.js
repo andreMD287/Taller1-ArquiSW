@@ -495,10 +495,11 @@ async function request(method, path, options = {}) {
     const error = outcome.error;
 
     // 403: no se refresca y no se cierra sesión. Un 403 no significa que la
-    // sesión sea inválida (CONTRATO §1.5): puede ser un usuario autenticado
-    // pidiendo algo reservado a ADMIN, o —hoy— la cadena de seguridad sin filtro
-    // JWT. Solo se informa y se propaga. El requestId viene de X-Request-Id, que
-    // llega incluso en el 403 vacío.
+    // sesión sea inválida (CONTRATO §1.5): significa que ESTA operación excede
+    // el rol. El caso vivo es un usuario autenticado pidiendo una escritura
+    // reservada a ADMIN, que `@PreAuthorize` rechaza. Solo se informa y se
+    // propaga. El requestId sale del cuerpo si viene y, si no, de X-Request-Id,
+    // que RequestIdFilter pone en toda respuesta.
     if (error.httpStatus === 403) {
         notifyProvider({
             type: "session:forbidden",

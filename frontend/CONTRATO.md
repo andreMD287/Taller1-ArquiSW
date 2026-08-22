@@ -13,9 +13,9 @@ corresponde a cada caso.
 
 | Marca | Significado |
 |---|---|
-| ✅ **VERIFICADO** | Leído directamente del código del backend en el commit `cce0957` (merge de `origin/main` en `thomas`). Las fuentes se citan en cada sección. Si el código cambia y este documento no, **el documento está mal**. |
+| ✅ **VERIFICADO** | Leído directamente del código del backend tal como está integrado en la rama `thomas`, es decir el estado que dejó el último merge de `origin/main` (hoy `2c5b7e8`) — que es el que trae la seguridad activa: `d22c8bc feat(security): habilita autenticacion JWT y autorizacion por roles` y `7904528 docs: registra decisiones de seguridad JWT y RBAC`. **La referencia vinculante es el código de la rama, no el hash**: un merge posterior lo desplaza sin invalidar este documento, y los hashes se citan solo para fechar qué entró. Las fuentes concretas se citan en cada sección. Si el código cambia y este documento no, **el documento está mal**. |
 | 🟡 **PROPUESTO** | **No existe en el código.** Es una petición del frontend, pendiente de confirmación de Rol 1. Nada de esto puede darse por implementado. |
-| ⚠️ **BLOQUEANTE** | Verificado en el código, y hoy impide que el frontend funcione. Requiere acción de otro rol. |
+| ⚠️ **BLOQUEANTE / ABIERTO** | Verificado en el código, y hoy limita o impide que el frontend funcione. Requiere una decisión o el trabajo de algún rol. |
 
 **Fuentes verificadas:** `backend/src/main/java/com/taller/auth/product/api/`
 (`ProductController`, `ProductRequest`, `ProductResponse`, `PageResponse`),
@@ -157,78 +157,155 @@ del frontend, que debería haberlo atajado antes de enviar—; `422
 business_rule_violation` significa que la petición era correcta y el **negocio** la
 rechazó, que es información para el usuario.
 
-### 1.5 El `403` no tiene `code` ni cuerpo — *(observado)*
+### 1.5 Respuestas de seguridad: 401 y 403 — ✅ VERIFICADO (ejecutado)
 
-**Ninguna respuesta de la tabla anterior cubre el `403`**, porque no la produce
-`GlobalExceptionHandler`: la corta Spring Security en la cadena de filtros, antes de
-llegar al controlador. No hay `@ExceptionHandler(AccessDeniedException)` ni
-`AuthenticationEntryPoint` propio en el backend, así que el cuerpo **viene vacío**:
+**Las dos respuestas de seguridad NO tienen la misma forma.** No hay uniformidad
+que asumir y este documento no la inventa: cada una nace en un sitio distinto del
+backend y por eso trae campos distintos.
+
+#### 401 — falta autenticación o el JWT no es válido
+
+Lo produce el `authenticationEntryPoint` de `SecurityConfig`, que escribe el JSON
+a mano. **No pasa por `GlobalExceptionHandler`**, así que NO es un `ErrorResponse`
+completo: trae un único campo.
 
 ```
 $ curl -i http://localhost:8080/api/products
-HTTP/1.1 403
-X-Request-Id: 1960d2ca-ae57-44b6-935a-b4e54335de06
-Content-Length: 0            ← sin Content-Type, sin cuerpo, sin code
+HTTP/1.1 401
+X-Request-Id: e5f9c365-4a75-40e9-a4f3-dabf95398172
+Content-Type: application/json;charset=ISO-8859-1
+{"code":"unauthorized"}
 ```
 
-Hay que distinguir dos situaciones que producen el mismo `403`:
+Idéntico con un `Bearer` ilegible o caducado: `JwtAuthenticationFilter` captura
+`InvalidSessionException`, limpia el `SecurityContext` y deja seguir la petición,
+que `.anyRequest().authenticated()` rechaza en el entry point.
 
-| | Causa | Duración |
-|---|---|---|
-| **Hoy** | No existe el filtro que construye la autenticación a partir del JWT, así que **ninguna** petición a un endpoint protegido llega autenticada — ni siquiera con un `Bearer` válido (§2, verificado con token real). | Transitoria: desaparece cuando Rol 2 entregue el filtro. |
-| **Permanente** | Un usuario **autenticado** intenta una operación reservada a `ADMIN` (`POST`/`PUT`/`DELETE` de productos, ADR-011). | Estable: es el comportamiento correcto del sistema. |
+Sin `message`, sin `kind`, sin `retryable`, sin `detail` y **sin `requestId` en el
+cuerpo**: el único correlacionador es la cabecera `X-Request-Id`.
 
-**Consecuencias para el cliente HTTP:**
+#### 403 — autenticado, pero sin el rol requerido
 
-1. **Debe tolerar respuestas de error vacías o sin JSON parseable.** Un
-   `await response.json()` incondicional sobre un `403` lanza una excepción de
-   *parsing* y convierte un rechazo previsto en un fallo del frontend. El cliente
-   comprueba primero si hay cuerpo, y si no lo hay construye un error propio a partir
-   del status.
-2. **No hay `code` estable que consultar.** Este documento **no inventa uno**: el
-   backend no lo produce. La UI ramifica por el status `403`, no por `code`.
-3. **El `X-Request-Id` sí llega** incluso en el `403` vacío —`RequestIdFilter` corre
-   con `HIGHEST_PRECEDENCE`, antes de la cadena de seguridad—, así que el error
-   sigue siendo correlacionable con los logs del backend.
-4. Mientras dure la situación de la primera fila, **un `403` no significa "no eres
-   ADMIN"**: hoy significa "el filtro JWT todavía no existe". La UI no debe deducir
-   el rol del usuario a partir de un `403`.
+Lo produce `@PreAuthorize("hasRole('ADMIN')")` lanzando `AuthorizationDeniedException`,
+que **sí** tiene `@ExceptionHandler` en `GlobalExceptionHandler`. Por eso llega un
+`ErrorResponse` completo:
+
+```
+$ curl -i -X POST http://localhost:8080/api/products \
+       -H "Authorization: Bearer <token de un USER>" -H 'Content-Type: application/json' \
+       -d '{"name":"X","price":1.0,"stock":1}'
+HTTP/1.1 403
+X-Request-Id: e837eef7-e679-4766-be03-0551980786c1
+Content-Type: application/json
+{"code":"access_denied","kind":"EXPECTED","message":"No tiene permisos para realizar esta operacion",
+ "retryable":false,"requestId":"e837eef7-e679-4766-be03-0551980786c1"}
+```
+
+`detail` y `violations` van **ausentes**, no en `null` (`@JsonInclude(NON_NULL)`).
+
+**Advertencia — hay una segunda forma posible de 403.** `SecurityConfig` también
+declara un `accessDeniedHandler` que escribe el JSON mínimo
+`{"code":"access_denied"}`. Se dispara si la denegación ocurre en la cadena de
+filtros en vez de en el método. Con los matchers actuales (`.anyRequest().authenticated()`)
+un usuario autenticado no cae por ahí para `/api/products`, así que **no se ha
+observado en ejecución**; queda registrado porque el código lo permite. Es decir:
+**dos respuestas con el mismo `code` y cuerpos distintos**.
+
+#### Qué se le exige, por tanto, al cliente HTTP
+
+1. **Seguir tolerando cuerpo vacío o JSON parcial.** Ya no es el caso actual, pero
+   sí sigue siendo posible: el handler mínimo de arriba, un `204`, un proxy que
+   devuelva HTML, un cuerpo truncado. Un `await response.json()` incondicional
+   convertiría un rechazo previsto en un fallo del frontend. `platform/errors.js`
+   lee texto y solo parsea si el texto es JSON válido; si no lo es, **no fabrica un
+   `code`**. Cubierto por la prueba "403 sin cuerpo (robustez, no el caso actual)"
+   de `tests/platform.test.js`, conservada exactamente con ese propósito.
+2. **No exigir campos que el backend puede no mandar.** El 401 vigente no trae
+   `message`, `kind` ni `requestId` en el cuerpo, y el modelo interno los normaliza
+   a `null` sin inventarlos (prueba `app 36`; `app 37` cubre los `403` parciales o no parseables).
+3. **`X-Request-Id` llega siempre.** `RequestIdFilter` corre con
+   `HIGHEST_PRECEDENCE`, antes de la cadena de seguridad, así que la cabecera está
+   incluso cuando el cuerpo no dice nada. Es el hilo con los logs del backend.
+4. **`category` (frontend) y `code` (backend) siguen siendo espacios de nombres
+   distintos.** `category` la decide `platform/errors.js` a partir del status para
+   que la UI no ramifique sobre números HTTP; `code` es siempre del backend y nunca
+   se fabrica. Que hoy el backend sí mande `code` en ambas respuestas no las funde:
+   un 403 sin cuerpo sigue dando `code: null` y `category: "forbidden"`.
+5. **Un `403` no significa "la sesión es inválida".** No se refresca y no se cierra
+   sesión: significa que **esta operación** excede el rol. Un `401`, en cambio, sí
+   devuelve al login.
+
+#### Nota de disponibilidad
+
+El 403 de `@PreAuthorize` trae `kind: "EXPECTED"`, así que la regla única de
+`platform/metrics.js` lo cuenta como **disponible** — correctamente: negarle a un
+USER una escritura de ADMIN es el sistema cumpliendo su especificación, no una
+caída. Un 403 *sin* `kind` seguiría contando como no disponible.
+
+#### Un hueco abierto que este cambio destapa — ⚠️ ABIERTO
+
+`platform/http.js` solo intenta el refresh silencioso ante `401` **con
+`code: "invalid_session"`**. Pero `InvalidSessionException` la captura y descarta
+`JwtAuthenticationFilter`, de modo que un access token caducado contra
+`/api/products` llega al cliente como `401 unauthorized`, **no** como
+`invalid_session`. Consecuencia: sobre los endpoints de productos ese reintento
+automático ya no se dispara. Hoy no rompe nada porque `session.js` renueva de forma
+proactiva antes del vencimiento, pero **el respaldo reactivo dejó de cubrir esa
+ruta**. Verificado leyendo `JwtAuthenticationFilter`, `TokenService.validateAccessToken`
+y `SecurityConfig`; queda registrado, no resuelto — cambiar la condición del
+reintento es una decisión de diseño, no una sincronización de documentación.
 
 ---
 
-## 2. ⚠️ BLOQUEANTE — estado real de la autorización
+## 2. Autorización de productos — ✅ VERIFICADO
 
-**Verificado en `SecurityConfig` (sin cambios desde Taller 1) y advertido por Rol 1
-en la cabecera de `ProductController` y en ADR-011.**
+**Verificado leyendo `config/SecurityConfig.java`, `security/JwtAuthenticationFilter.java`,
+`product/api/ProductController.java` y `test/.../integration/ProductSecurityIT.java`,
+y ejercitando el backend en local.**
 
-`SecurityConfig` declara `permitAll()` para `/api/auth/**`, `/api/diagnostics` y los
-`/actuator/health/**` — y `.anyRequest().authenticated()` para todo lo demás. Pero
-**no existe ningún filtro que traduzca el JWT en un `Authentication`**, y
-`@EnableWebSecurity` está sin `@EnableMethodSecurity`. De ahí se siguen dos hechos:
+Lo que antes figuraba aquí como bloqueante —filtro JWT ausente, `@EnableMethodSecurity`
+ausente, `/api/products` rechazando a todo el mundo, `@PreAuthorize` inertes— **quedó
+superado**: esas piezas llegaron juntas, como ADR-011 exigía. Estado vigente:
 
-1. **Hoy los cinco endpoints de `/api/products` responden con rechazo a todo el
-   mundo**, incluido `GET`, incluso enviando un `accessToken` válido. No hay forma
-   de que el frontend los consuma todavía.
-2. Los `@PreAuthorize("hasRole('ADMIN')")` de `ProductController` **están inertes**:
-   Spring los ignora en silencio sin `@EnableMethodSecurity`. Si llegara solo el
-   filtro JWT y no la anotación de configuración, `POST`/`PUT`/`DELETE` quedarían
-   abiertos a **cualquier usuario autenticado**.
+| Pieza | Estado |
+|---|---|
+| `JwtAuthenticationFilter` | Registrado con `addFilterBefore(..., UsernamePasswordAuthenticationFilter.class)`. Valida el access token con `TokenService`. |
+| Claim `role` | Firmado en el JWT y traducido a la authority `ROLE_USER` o `ROLE_ADMIN`. |
+| `@EnableMethodSecurity` | **Activo** en `SecurityConfig`, junto a `@EnableWebSecurity`. |
+| `@PreAuthorize("hasRole('ADMIN')")` | **Se aplica**: ya no es una anotación ignorada en silencio. |
 
-**Cómo procede el frontend mientras tanto:** las pantallas de productos se
-construyen contra este contrato tal como está escrito abajo (es el contrato que
-Rol 1 ya fijó y que no va a cambiar cuando la autorización se active), y el envío
-del token se implementa en `src/platform/http` desde ya, para que el día que el filtro
-exista no haya que tocar `src/crud/` ni `src/resources/`. Lo que no puede hacerse hoy es
-**probar** esas pantallas de punta a punta.
+| Operación | Requisito | Verificado en |
+|---|---|---|
+| `GET /api/products`, `GET /api/products/{id}` | Autenticado (cualquier rol) | `ProductSecurityIT.usuarioAutenticadoPuedeConsultarProductos` |
+| `POST /api/products` | **ADMIN** | `usuarioNormalNoPuedeCrearProductos` / `adminPuedeCrearProductos` |
+| `PUT /api/products/{id}` | **ADMIN** | `@PreAuthorize` en `ProductController` |
+| `DELETE /api/products/{id}` | **ADMIN** | `usuarioNormalNoPuedeEliminarProductos` / `adminPuedeEliminarProductos` |
+| Sin token o token inválido | 401 | `listadoSinJwtEsRechazado` / `jwtInvalidoEsRechazado` |
 
-### 2.1 Cómo se envía el token — 🟡 PROPUESTO
+**Alcance de esa evidencia:** `ProductSecurityIT` afirma **códigos de estado**, no
+cuerpos. Ninguna de sus pruebas comprueba que el 403 pase por
+`GlobalExceptionHandler`. Las formas de cuerpo documentadas en §1.5 se obtuvieron
+ejecutando el backend en local, no de esas pruebas — y se marcan como observadas,
+no como garantizadas por la suite del backend.
 
-Ningún endpoint actual lee la cabecera `Authorization`: `/api/auth/**` recibe el
-token **en el cuerpo** (`{"token": ...}`, `{"refreshToken": ...}`), y `/api/products`
-no llega a leer nada porque la petición se rechaza antes.
+**Lo que el frontend hace con esto — y lo que NO.** La interfaz oculta las acciones
+de escritura a quien no es ADMIN (`descriptor.permits.write`, resuelto por
+`app.js#can`). Eso es **adaptación visual, no seguridad**: el backend vuelve a
+comprobar el rol en cada petición. Ocultar el botón ahorra un rechazo previsible;
+no protege nada frente a una llamada directa al API. Por eso el manejo del `403`
+sigue existiendo aunque la UI creyera que la operación era imposible: un rol
+obsoleto en pantalla, otra pestaña o un cambio de rol en servidor bastan para que
+llegue.
 
-El frontend asume el estándar `Authorization: Bearer <accessToken>`, que es lo que
-un filtro JWT convencional espera. **Confirmar con Rol 2** al implementar el filtro.
+### 2.1 Cómo se envía el token — ✅ VERIFICADO
+
+`Authorization: Bearer <accessToken>`, que es lo que lee `JwtAuthenticationFilter`
+(`request.getHeader(HttpHeaders.AUTHORIZATION)`, prefijo `"Bearer "`). Lo que antes
+era una suposición pendiente de confirmar con Rol 2 está ahora leído en el código.
+
+Sigue siendo cierto que `/api/auth/**` recibe los tokens **en el cuerpo**
+(`{"token": ...}`, `{"refreshToken": ...}`) y no por cabecera: son endpoints
+`permitAll()` y no pasan por el filtro.
 
 ---
 
@@ -437,7 +514,7 @@ se cubre solo, pero conviene registrar el `note` en consola.
 
 ---
 
-## 4. Productos — ✅ VERIFICADO (contrato) / ⚠️ inaccesible hoy (§2)
+## 4. Productos — ✅ VERIFICADO (contrato y acceso, §2)
 
 Base: `/api/products`. **Nótese que la ruta está en inglés**, coherente con el resto
 del código, no `/api/productos`.
@@ -543,8 +620,8 @@ El selector de tamaño de página del frontend se limita a valores ≤ 100 para 
 que el usuario pide y lo que recibe coincidan.
 
 ⚠️ **`sort` con un campo que no existe en `Product` es una limitación abierta del
-backend.** *(deducido del código — no verificable hoy: el endpoint responde `403` a
-todo, §2, comprobado también con un `Bearer` válido.)*
+backend.** *(deducido del código. Ahora que el endpoint es accesible (§2) se podría
+ejercitar de punta a punta; aquí sigue marcado como deducido porque no se ha hecho.)*
 
 `PageableHandlerMethodArgumentResolver` no valida el nombre del campo —no conoce el
 tipo de dominio—, así que un `?sort=noExiste,asc` llega hasta Spring Data, que lanza
@@ -890,8 +967,9 @@ mensaje—. Este documento no estima el costo de ninguna de las dos.
 | 1 | Autenticación (`/api/auth/**`) | ✅ Verificado y consumible hoy | — |
 | 2 | Diagnóstico (`/api/diagnostics`) | ✅ Verificado y consumible hoy | — |
 | 3 | Contrato de productos (`/api/products`) | ✅ Verificado en código | — |
-| 4 | Acceso real a `/api/products` | ⚠️ **Bloqueado**: falta el filtro JWT y `@EnableMethodSecurity` (ADR-011) | Rol 2 |
-| 5 | Cabecera `Authorization: Bearer` | 🟡 Propuesto — ningún endpoint la lee todavía | Rol 2 |
+| 4 | Acceso real a `/api/products` | ✅ **Desbloqueado**: `JwtAuthenticationFilter` y `@EnableMethodSecurity` ya están activos; leer exige autenticación y escribir exige ADMIN (§2, ADR-011) | — |
+| 4b | Refresh reactivo ante un access token caducado en `/api/products` | ⚠️ **Abierto**: el filtro lo convierte en `401 unauthorized`, y `http.js` solo reintenta ante `invalid_session` (§1.5). Sin impacto hoy por el refresh proactivo de `session.js` | Rol 3 |
+| 5 | Cabecera `Authorization: Bearer` | ✅ Verificado: es la que lee `JwtAuthenticationFilter` (§2.1) | — |
 | 6 | Rol del usuario | ✅ Disponible como *claim* firmado en el access token (§3.2). 🟡 Sigue propuesto exponerlo en el cuerpo de las respuestas (§6.3), como mejora no bloqueante | Rol 1 |
 | 6b | Usuarios desactivados no inician sesión ni renuevan | ✅ Verificado tras el merge (§3.2, §3.4). Cierra la pregunta 4 de §6.1 | — |
 | 7 | `POST /api/products/{id}/restore` | 🟡 Propuesto (§6.2) | Rol 1 |

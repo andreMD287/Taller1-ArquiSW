@@ -5,17 +5,23 @@
  * `[data-app-shell]`. Así estas pruebas comprueban el marcado que de verdad se
  * sirve, y no una copia que podría divergir en silencio.
  *
- * NOTA SOBRE EL BACKEND ACTUAL: `SecurityConfig` no registra ningún filtro que
- * traduzca el JWT en un `Authentication` y no lleva `@EnableMethodSecurity`, así
- * que contra el backend real `/api/products` responde 403 incluso con un token
- * válido. Aquí se sustituye `fetch`, de modo que estas pruebas describen la
- * composición, no el estado de esa pieza pendiente.
+ * AUTORIZACIÓN DEL BACKEND (estado verificado). `JwtAuthenticationFilter` valida
+ * el access token y convierte el claim firmado `role` en `ROLE_USER` o
+ * `ROLE_ADMIN`; `@EnableMethodSecurity` está activo, así que los `@PreAuthorize`
+ * de `ProductController` se aplican: leer exige autenticación y `POST`/`PUT`/
+ * `DELETE` exigen ADMIN. Verificado en `SecurityConfig`,
+ * `JwtAuthenticationFilter`, `ProductController` y `ProductSecurityIT`.
+ *
+ * Aquí se sustituye `fetch`, así que estas pruebas fijan cómo REACCIONA la
+ * composición a ese contrato, no el contrato en sí. Que la interfaz oculte
+ * acciones de escritura a un USER es adaptación visual, no seguridad: el
+ * backend vuelve a comprobar el rol, y por eso el 403 se sigue manejando.
  */
 
-import { test, assert, assertEqual, installFetch, jsonResponse, makeResponse, errorResponse,
+import { test, assert, assertEqual, assertDeepEqual, installFetch, jsonResponse, makeResponse, errorResponse,
          memoryStorage, fakeClock, deferred, tick, fakeJwt, tokenPair } from "./harness.js";
 import * as metrics from "../src/platform/metrics.js";
-import { configureAuthProvider, resetHttpConfig } from "../src/platform/http.js";
+import { configureAuthProvider, resetHttpConfig, post } from "../src/platform/http.js";
 import * as session from "../src/platform/session.js";
 import { validateDescriptor } from "../src/crud/engine.js";
 import products from "../src/resources/products.js";
@@ -416,29 +422,82 @@ test("app 14: session:expired desmonta y vuelve al login", async () => {
     } finally { cleanup(); }
 });
 
-test("app 15: session:forbidden conserva la sesión y muestra el requestId", async () => {
+/**
+ * El 403 vigente sobre una escritura: USER autenticado contra `@PreAuthorize`.
+ * Pasa por GlobalExceptionHandler, así que trae ErrorResponse completo —con
+ * `requestId` en el cuerpo Y en la cabecera— y `kind: "EXPECTED"`.
+ * Forma observada contra el backend real, no supuesta.
+ */
+const forbiddenWrite = (requestId) => makeResponse({
+    status: 403,
+    body: JSON.stringify({
+        code: "access_denied",
+        kind: "EXPECTED",
+        message: "No tiene permisos para realizar esta operacion",
+        retryable: false,
+        requestId
+    }),
+    headers: { "Content-Type": "application/json", "X-Request-Id": requestId }
+});
+
+test("app 15: un USER recibe 403 en la escritura; la sesión se conserva y no se inventa invalid_session", async () => {
     fresh();
     const { shell } = await loadShell();
     let listados = 0;
     const net = installFetch((url, init) => {
-        if (url.includes("/api/auth/login")) return jsonResponse(200, tokens());
-        listados += 1;
-        // El 403 vacío que hoy devuelve el backend a /api/products.
-        return makeResponse({ status: 403, body: "", headers: { "X-Request-Id": "req-403" } });
+        if (url.includes("/api/auth/login")) return jsonResponse(200, tokens({ role: "USER" }));
+        const method = (init && init.method) || "GET";
+        if (method === "GET") {
+            listados += 1;
+            return jsonResponse(200, productPage([product(1)]));   // leer SÍ funciona
+        }
+        return forbiddenWrite("req-403");                          // escribir exige ADMIN
     });
     try {
         const app = launch(shell);
         await app.ready;
         await loginThrough(app, shell);
 
+        // 1. La lectura de un USER funciona.
+        assertEqual(shell.dataset.view, "app", "la aplicación queda montada");
+        assertEqual(session.role(), "USER", "con rol USER");
+        assertEqual(listados, 1, "el listado se cargó");
+        assert(shell.querySelectorAll("tbody tr").length > 0, "y muestra filas");
+
+        // 2. La escritura ni siquiera se ofrece: el motor la oculta a un USER.
+        //    Por eso no se puede disparar desde un botón — y no se debilita eso.
+        const instancia = app.getInstance();
+        assertEqual(shell.querySelector(".crud__create").hidden, true, "sin botón de crear");
+        assertEqual(shell.querySelectorAll(".crud-table__action").length, 0, "sin acciones de fila");
+        assertEqual(await instancia.remove(1), null, "y su API pública rehúsa mutar");
+        assertEqual(net.calls.filter((c) =>
+            c.url.includes("/api/products") && (c.init.method || "GET") !== "GET").length, 0,
+            "no salió ninguna escritura contra /api/products");
+
+        // 3. Camino público existente: una escritura sí emitida por el cliente
+        //    HTTP —un rol obsoleto, otra pestaña, una llamada directa—.
+        const fallo = await post("/api/products", { body: { name: "X", price: 1, stock: 1 } })
+            .then(() => null, (e) => e);
+        await tick(4);
+
+        assert(fallo !== null, "la escritura fue rechazada");
+        assertEqual(fallo.error.httpStatus, 403, "403");
+        assertEqual(fallo.error.code, "access_denied", "code del backend, tal cual");
+        assertEqual(fallo.error.category, "forbidden", "category interna del frontend");
+        assert(fallo.error.code !== "invalid_session", "no se inventa invalid_session");
+
+        // 4. Consecuencias en la composición.
         assertEqual(shell.dataset.view, "app", "la sesión se conserva");
         assertEqual(session.isAuthenticated(), true, "sigue autenticado");
-        const aviso = shell.querySelector("[data-notice]").textContent;
-        assert(aviso.indexOf("req-403") >= 0, "muestra el requestId: " + aviso);
-        assertEqual(shell.querySelector("[data-notice]").dataset.requestId, "req-403", "y lo conserva");
-        const refrescos = net.calls.filter((c) => c.url.includes("/api/auth/refresh")).length;
-        assertEqual(refrescos, 0, "no intenta refresh ante un 403");
-        assertEqual(listados, 1, "ni reintenta en bucle");
+        assertEqual(net.calls.filter((c) => c.url.includes("/api/auth/refresh")).length, 0,
+            "no intenta refresh: un 403 no dice que la sesión sea inválida");
+        assertEqual(net.calls.filter((c) => c.url.includes("/api/auth/logout")).length, 0,
+            "ni cierra sesión");
+        const aviso = shell.querySelector("[data-notice]");
+        assert(aviso.textContent.indexOf("req-403") >= 0, "la interfaz muestra el rechazo: " + aviso.textContent);
+        assertEqual(isVisible(aviso), true, "en una región visible");
+        assertEqual(aviso.dataset.requestId, "req-403", "conserva el requestId");
+        assertEqual(listados, 1, "y no reintenta en bucle");
     } finally { net.restore(); cleanup(); }
 });
 
@@ -597,6 +656,7 @@ test("app 21 a 24: capacidades traducidas de forma restrictiva", async () => {
         assertEqual(can(null), false, "y null también");
         assertEqual(shell.querySelector(".crud__create").hidden, false, "ADMIN ve el botón de crear");
         assert(shell.querySelector(".crud-table__action--edit") !== null, "y las acciones de fila");
+        assertEqual(shell.querySelector("[data-user-role]").textContent, "ADMIN", "y el rol se muestra");
     } finally { net.restore(); cleanup(); }
 });
 
@@ -622,6 +682,7 @@ test("app 22 y 23: USER conserva lectura pero no obtiene escritura", async () =>
         assertEqual(shell.querySelector(".crud-table__action--edit"), null, "sin editar");
         assertEqual(shell.querySelector(".crud-table__action--delete"), null, "sin eliminar");
         assert(shell.querySelector(".crud-table__row") !== null, "pero la tabla sí muestra datos");
+        assertEqual(shell.querySelector("[data-user-role]").textContent, "USER", "y el rol se muestra");
     } finally { net.restore(); cleanup(); }
 });
 
@@ -852,5 +913,96 @@ test("app 35: el shell no codifica ningún recurso; el nombre viene del descript
         assertEqual(shell.querySelectorAll("[data-resource-nav] button").length, resources.length,
             "un botón por recurso registrado, sin casos especiales");
     } finally { net.restore(); cleanup(); }
+});
+
+/* ============ Contrato de seguridad vigente: JWT + RBAC activos ========= */
+
+test("app 36: el 401 mínimo {\"code\":\"unauthorized\"} se normaliza sin exigir campos ausentes", async () => {
+    fresh();
+    const { shell } = await loadShell();
+    // Forma EXACTA de SecurityConfig: un solo campo, y el requestId solo en la
+    // cabecera. Sin message, sin detail, sin kind, sin requestId en el cuerpo.
+    const net = installFetch((url) => {
+        if (url.includes("/api/auth/login")) return jsonResponse(200, tokens());
+        return makeResponse({
+            status: 401,
+            body: '{"code":"unauthorized"}',
+            headers: { "Content-Type": "application/json;charset=ISO-8859-1",
+                       "X-Request-Id": "req-401" }
+        });
+    });
+    try {
+        const app = launch(shell);
+        await app.ready;
+        await loginThrough(app, shell);
+
+        const fallo = await post("/api/products", { body: { name: "X", price: 1, stock: 1 } })
+            .then(() => null, (e) => e);
+        assert(fallo !== null, "el 401 se propaga");
+        const model = fallo.error;
+
+        assertEqual(model.code, "unauthorized", "el code del backend se conserva");
+        assertEqual(model.category, "unauthorized", "y la category interna es la del status");
+        assertEqual(model.httpStatus, 401, "status");
+        assertEqual(model.requestId, "req-401", "requestId rescatado de la cabecera");
+        // Lo ausente se normaliza, no se exige ni se inventa.
+        assertEqual(model.message, null, "sin message: null, no undefined ni inventado");
+        assertEqual(model.detail, null, "sin detail");
+        assertEqual(model.kind, null, "sin kind");
+        assertEqual(model.retryable, false, "retryable ausente = false");
+        assertDeepEqual(model.violations, [], "violations normalizado a arreglo");
+        assertDeepEqual(model.violationsByField, {}, "y su índice");
+
+        // Un 401 que NO es invalid_session no dispara el refresh silencioso.
+        assertEqual(net.calls.filter((c) => c.url.includes("/api/auth/refresh")).length, 0,
+            "no se refresca por un 401 unauthorized");
+    } finally { net.restore(); cleanup(); }
+});
+
+test("app 37: una respuesta parcial de Spring Security no rompe el parseo y sigue siendo texto seguro", async () => {
+    const parciales = [
+        ['{"code":"access_denied"}', "access_denied", "JSON mínimo del accessDeniedHandler"],
+        ['{"code":"access_denied","kind":"EXPECTED"}', "access_denied", "JSON a medio camino"],
+        ['{"code":"access_denied",', null, "JSON truncado: no se fabrica un code"],
+        ["", null, "cuerpo vacío"],
+        ["<html><body>403 Forbidden</body></html>", null, "HTML de un proxy"]
+    ];
+    for (const [cuerpo, codeEsperado, caso] of parciales) {
+        fresh();
+        const { shell } = await loadShell();
+        const net = installFetch((url) => {
+            if (url.includes("/api/auth/login")) return jsonResponse(200, tokens({ role: "USER" }));
+            if (url.includes("/api/products") && cuerpo !== undefined) {
+                return makeResponse({ status: 403, body: cuerpo,
+                    headers: { "X-Request-Id": "req-parcial" } });
+            }
+            return jsonResponse(200, emptyPage);
+        });
+        try {
+            const app = launch(shell);
+            await app.ready;
+            await loginThrough(app, shell);
+            await tick(4);
+
+            // Ni el parseo ni la composición se rompen.
+            assertEqual(session.isAuthenticated(), true, caso + ": la sesión sobrevive");
+            assertEqual(shell.dataset.view, "app", caso + ": la vista sobrevive");
+
+            const aviso = shell.querySelector("[data-notice]");
+            assertEqual(aviso.dataset.requestId, "req-parcial", caso + ": conserva el requestId");
+
+            // El texto mostrado es seguro: se inserta como texto, nunca como marcado.
+            assertEqual(aviso.querySelectorAll("*").length, 0,
+                caso + ": el mensaje no introduce nodos");
+            assert(aviso.textContent.indexOf("<body>") === -1,
+                caso + ": ni vuelca el cuerpo crudo del servidor");
+
+            const fallo = await post("/api/products", { body: {} }).then(() => null, (e) => e);
+            assertEqual(fallo.error.code, codeEsperado, caso + ": code");
+            assertEqual(fallo.error.category, "forbidden", caso + ": category por status");
+            assertEqual(net.calls.filter((c) => c.url.includes("/api/auth/refresh")).length, 0,
+                caso + ": ningún 403 dispara refresh");
+        } finally { net.restore(); cleanup(); }
+    }
 });
 }

@@ -5,8 +5,8 @@
  * TÁCTICA APLICADA
  * ----------------
  * "Encapsulate" (Cap. 7): la forma en que el backend reporta un fallo —el
- * ErrorResponse de ADR-007, un cuerpo vacío de la cadena de seguridad, un
- * rechazo de fetch— queda contenida aquí. El resto del frontend consume un
+ * ErrorResponse de ADR-007, el JSON mínimo de la cadena de seguridad, un cuerpo
+ * vacío, un rechazo de fetch— queda contenida aquí. El resto del frontend consume un
  * único modelo y no vuelve a mirar un status HTTP crudo ni a parsear un cuerpo.
  * Si el contrato de transporte cambia, cambia este archivo.
  *
@@ -27,16 +27,19 @@
  * backend. Existe para que la UI decida su reacción (reintentar, volver al
  * login, resaltar campos) sin ramificar sobre números HTTP repartidos por toda
  * la aplicación. El cliente NUNCA debe inventar un ErrorResponse.code: cuando el
- * backend no lo produce —el 403 vacío es el caso real— `code` queda en null y
- * lo que se usa es `category`. Son dos espacios de nombres distintos y no deben
- * mezclarse.
+ * backend no lo produce, `code` queda en null y lo que se usa es `category`.
+ * Son dos espacios de nombres distintos y no deben mezclarse. Hoy la cadena de
+ * seguridad SÍ produce `code` —`unauthorized` en el 401, `access_denied` en el
+ * 403 de `@PreAuthorize`—, pero eso no cambia la regla: `category` la decide
+ * este módulo a partir del status, y `code` es siempre del backend.
  *
  * SOBRE `X-Request-Id`
  * --------------------
  * Se toma del cuerpo (`requestId`) cuando el backend lo incluye, y de la
  * cabecera `X-Request-Id` cuando no hay cuerpo interpretable. El filtro
  * RequestIdFilter corre con HIGHEST_PRECEDENCE, antes de la cadena de
- * seguridad, así que la cabecera llega incluso en el 403 vacío: es el único
+ * seguridad, así que la cabecera llega SIEMPRE — también en el 401
+ * `{"code":"unauthorized"}`, que no trae `requestId` en el cuerpo. Es el único
  * hilo que permite correlacionar ese rechazo con los logs del backend.
  *
  * LECTURA DEL CUERPO
@@ -147,8 +150,9 @@ function baseModel(overrides) {
 export function fromResponse({ status, requestId = null, bodyText = "", bodyJson = null }) {
     const category = categoryForStatus(status);
 
-    // Sin JSON interpretable: el caso real es el 403 vacío de Spring Security,
-    // que llega sin Content-Type, sin cuerpo y sin code. No se fabrica un code.
+    // Sin JSON interpretable. Hoy la cadena de seguridad sí manda JSON, pero esta
+    // rama NO es histórica: cubre un cuerpo vacío, un 204, un HTML de proxy o un
+    // JSON truncado. En ninguno de esos casos se fabrica un code.
     if (bodyJson === null || typeof bodyJson !== "object") {
         const text = typeof bodyText === "string" ? bodyText.trim() : "";
         return baseModel({
