@@ -328,7 +328,7 @@ Atributo central del Taller 2. Las decisiones que lo sustentan están en
 | **Entorno** | Tiempo de diseño, sobre el código fuente. No requiere detener el servicio |
 | **Respuesta** | El atributo queda disponible en la API y en la interfaz; la regla se aplica en alta y edición, respondiendo `422` con el campo señalado; **ninguna regla existente cambia de comportamiento** |
 | **Medida de respuesta** | **≤3 módulos** tocados · **0 archivos existentes modificados en el motor de reglas** · **0 archivos del módulo de usuarios o de autenticación** · **<3 horas** · **0 defectos nuevos**: la suite completa pasa sin modificar ningún test existente |
-| **Verificado** | **Pendiente de ejecutar.** El guion reproducible está en [`docs/EJERCICIO-MODIFICABILIDAD.md`](../../docs/EJERCICIO-MODIFICABILIDAD.md); las cifras de arriba son el objetivo, no una medición. Se completará con los valores reales al correrlo |
+| **Verificado** | **Sí — ensayo ejecutado el 2026-08-22.** 3 módulos · 5 archivos modificados y 3 nuevos · **0** en el motor de reglas · **0** en el módulo de usuarios · **0** tests existentes modificados · 124 tests en verde. Guion y medidas en [`docs/EJERCICIO-MODIFICABILIDAD.md`](../../docs/EJERCICIO-MODIFICABILIDAD.md). El **tiempo** queda pendiente: el ensayo verificó el alcance del cambio, no lo cronometró |
 
 **Qué significa "≤3 módulos" aquí.** Un módulo es una unidad con dueño y frontera
 propia, del tamaño de *productos* / *usuarios* / *presentación* — no un paquete de capa.
