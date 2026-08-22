@@ -782,3 +782,47 @@ Riesgo asumido por la elección de métodos explícitos: `ProductRepository` her
 de `JpaRepository` los métodos `findAll()`, `findById()` y `findAll(Pageable)`,
 que **no filtran por `active`**. El filtro no es estructural — depende de la
 disciplina de quien llama. Se cubrirá con un test cuando exista el repositorio.
+
+## ADR-011 — Autenticación JWT y autorización basada en roles
+
+**Estado:** Aceptada
+
+### Contexto
+
+El sistema ya manejaba access tokens JWT para autenticación y refresh tokens persistidos para renovación y revocación. Para el Taller 2 se requiere además controlar el acceso a operaciones del CRUD según el rol del usuario.
+
+Los roles definidos son:
+
+- `USER`
+- `ADMIN`
+
+Los endpoints de lectura de productos requieren que el usuario esté autenticado, mientras que las operaciones de creación, modificación y eliminación requieren rol `ADMIN`.
+
+También se mantiene como restricción arquitectónica que la validación frecuente del access token no vuelva a introducir PostgreSQL en el camino crítico.
+
+### Decisión
+
+El access token JWT incluye los siguientes claims:
+
+- `sub`: ID inmutable del usuario.
+- `username`: nombre actual del usuario.
+- `role`: `USER` o `ADMIN`.
+
+`TokenService.validateAccessToken()` valida la firma, expiración y claims completamente en memoria.
+
+Se incorporó `JwtAuthenticationFilter`, que:
+
+1. lee el encabezado `Authorization: Bearer <token>`;
+2. valida el JWT mediante `TokenService`;
+3. obtiene el rol firmado en el token;
+4. lo transforma en una authority de Spring Security:
+   - `USER` → `ROLE_USER`
+   - `ADMIN` → `ROLE_ADMIN`;
+5. registra el `Authentication` en el `SecurityContext`.
+
+Se habilitó `@EnableMethodSecurity` en la misma entrega que el filtro JWT, evitando un estado intermedio donde los `@PreAuthorize` pudieran ser ignorados.
+
+Las operaciones sensibles del módulo de productos utilizan:
+
+```java
+@PreAuthorize("hasRole('ADMIN')")
