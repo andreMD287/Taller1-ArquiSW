@@ -680,7 +680,7 @@ documentarse para Rol 4 como paso obligatorio de puesta en marcha.
 ## ADR-011 — Autorización de productos: leer autenticado, escribir ADMIN
 
 **Fecha:** 2026-08-18
-**Estado:** Aceptada — **implementada (inerte hasta que Rol 2 entregue)**
+**Estado:** Aceptada — **implementada y activa**
 
 ### Decisión
 
@@ -822,7 +822,7 @@ de `JpaRepository` los métodos `findAll()`, `findById()` y `findAll(Pageable)`,
 que **no filtran por `active`**. El filtro no es estructural — depende de la
 disciplina de quien llama. Se cubrirá con un test cuando exista el repositorio.
 
-## ADR-011 — Autenticación JWT y autorización basada en roles
+## ADR-013 — Autenticación JWT y autorización basada en roles
 
 **Estado:** Aceptada
 

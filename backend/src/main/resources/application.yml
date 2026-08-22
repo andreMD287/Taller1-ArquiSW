@@ -120,6 +120,11 @@ app:
     # que puede correr con un intervalo relajado.
     purge-interval-ms: 3600000
 
+    cors:
+    allowed-origins:
+      - http://localhost:8123
+      - http://127.0.0.1:8123
+
 # Feature toggles: desacoplan el despliegue del release (Cap. 5).
 features:
   new-dashboard: false
