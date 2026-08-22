@@ -213,6 +213,123 @@ export function installFetch(handler) {
     return { calls, restore: () => { globalThis.fetch = original; } };
 }
 
+/* ------------------- dobles para las pruebas de sesión ------------------ */
+
+/**
+ * Almacenamiento en memoria con la superficie de localStorage y contadores.
+ *
+ * Las pruebas NUNCA deben tocar el localStorage real del navegador de quien las
+ * ejecuta: dejaría basura entre corridas y haría que el resultado dependiera del
+ * estado previo del navegador.
+ */
+export function memoryStorage(initial = {}) {
+    const data = new Map(Object.entries(initial));
+    const counts = { getItem: 0, setItem: 0, removeItem: 0 };
+    const writes = [];
+    return {
+        counts,
+        writes,
+        data,
+        getItem(key) { counts.getItem++; return data.has(key) ? data.get(key) : null; },
+        setItem(key, value) { counts.setItem++; writes.push(value); data.set(key, value); },
+        removeItem(key) { counts.removeItem++; data.delete(key); },
+        raw(key) { return data.has(key) ? data.get(key) : null; },
+        parsed(key) { const raw = this.raw(key); return raw === null ? null : JSON.parse(raw); }
+    };
+}
+
+/**
+ * Reloj y temporizadores controlados: ninguna prueba espera tiempo real.
+ *
+ * advance(ms) mueve el reloj y dispara los temporizadores vencidos, en orden.
+ * pending() dice cuántos siguen vivos, que es como se comprueba —de forma
+ * ejecutable, no por inspección visual— que no quedan temporizadores huérfanos.
+ */
+export function fakeClock(startMs = 1_700_000_000_000) {
+    let current = startMs;
+    let nextId = 1;
+    const timers = new Map();
+    return {
+        now: () => current,
+        setTimeout: (fn, ms) => {
+            const id = nextId++;
+            timers.set(id, { fn, at: current + (Number(ms) || 0) });
+            return id;
+        },
+        clearTimeout: (id) => { timers.delete(id); },
+        pending: () => timers.size,
+        set(ms) { current = ms; },
+        /** Dispara los temporizadores vencidos sin mover el reloj. */
+        flush() {
+            const due = [...timers.entries()].filter(([, t]) => t.at <= current).sort((a, b) => a[1].at - b[1].at);
+            for (const [id, timer] of due) { timers.delete(id); timer.fn(); }
+            return due.length;
+        },
+        advance(ms) { current += ms; return this.flush(); }
+    };
+}
+
+/** Una promesa que la prueba resuelve o rechaza cuando quiera. */
+export function deferred() {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+}
+
+/** Cede el turno al bucle de microtareas, para que las promesas encadenen. */
+export function tick(times = 1) {
+    let chain = Promise.resolve();
+    for (let i = 0; i < times; i++) chain = chain.then(() => {});
+    return chain;
+}
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function toBase64Url(text) {
+    let output = "";
+    for (let i = 0; i < text.length; i += 3) {
+        const a = text.charCodeAt(i);
+        const b = i + 1 < text.length ? text.charCodeAt(i + 1) : NaN;
+        const c = i + 2 < text.length ? text.charCodeAt(i + 2) : NaN;
+        output += B64[a >> 2];
+        output += B64[((a & 3) << 4) | (Number.isNaN(b) ? 0 : b >> 4)];
+        output += Number.isNaN(b) ? "" : B64[((b & 15) << 2) | (Number.isNaN(c) ? 0 : c >> 6)];
+        output += Number.isNaN(c) ? "" : B64[c & 63];
+    }
+    return output.replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+/**
+ * JWT de mentira con la forma real del backend: tres segmentos y el payload en
+ * base64url. La firma es un relleno: el frontend NO la valida (solo el backend
+ * lo hace), así que para probar role() basta con que el payload sea legible.
+ */
+export function fakeJwt(payload = {}, { segments = 3, payloadOverride = null } = {}) {
+    const header = toBase64Url(JSON.stringify({ alg: "HS256" }));
+    const body = payloadOverride !== null ? payloadOverride : toBase64Url(JSON.stringify(payload));
+    const parts = [header, body, "firma-de-mentira"];
+    return parts.slice(0, segments).join(".");
+}
+
+/** Cuerpo de /login y /refresh tal como lo define TokenResponse. */
+export function tokenPair({ role = "USER", username = "maria123", accessToken = null,
+                            refreshToken = "refresh-1", accessExpiresAtMs, refreshExpiresAtMs } = {}) {
+    return {
+        accessToken: accessToken !== null ? accessToken : fakeJwt({ sub: "1", username, role }),
+        refreshToken,
+        username,
+        accessTokenExpiresAt: new Date(accessExpiresAtMs).toISOString(),
+        refreshTokenExpiresAt: new Date(refreshExpiresAtMs).toISOString()
+    };
+}
+
+/** Respuesta de error con la forma del ErrorResponse del backend. */
+export function errorResponse(status, { code, kind = "EXPECTED", message = "error", requestId = "req-1" } = {}) {
+    return jsonResponse(status, { code, kind, message, retryable: code === "data_unavailable", requestId },
+        { "X-Request-Id": requestId });
+}
+
 /** Respuesta que tarda `ms` y se cancela si el signal aborta antes. */
 export function delayed(ms, response) {
     return (url, init) => new Promise((resolve, reject) => {

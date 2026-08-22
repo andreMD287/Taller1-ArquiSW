@@ -16,6 +16,7 @@
 
 import { run } from "./harness.js";
 import "./platform.test.js";
+import "./session.test.js";
 
 // Algunos motores mínimos exponen print() y no console.log; navegador y Node,
 // al revés. Se elige el que exista.

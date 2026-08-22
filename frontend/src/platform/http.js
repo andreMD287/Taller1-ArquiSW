@@ -25,11 +25,17 @@
  * abortado cuenta como no disponible, y la taxonomía EXPECTED/FAULT/FAILURE
  * que decide eso es del Cap. 4, no de este módulo (ver metrics.js).
  *
- * QUÉ NO HACE ESTE COMMIT
- * -----------------------
- * No hay reintentos automáticos, ni manejo de 401, ni refresh silencioso, ni
- * caché, ni cola de concurrencia. Llegan con session.js y con el commit de
- * caché. Aquí solo está el transporte.
+ * QUÉ HACE Y QUÉ NO HACE ANTE UN 401
+ * ----------------------------------
+ * Ante un 401 invalid_session pide UNA renovación al proveedor inyectado y
+ * reintenta la petición original UNA sola vez. Lo que NO hace es coordinar esa
+ * renovación: aquí no hay refreshPromise, ni cola, ni contador de renovaciones
+ * en vuelo. Si diez peticiones reciben 401 a la vez, las diez piden refresh y es
+ * el proveedor quien garantiza que eso sea un solo canje del refresh token.
+ * Duplicar la coordinación en los dos módulos es exactamente lo que produciría
+ * dos canjes simultáneos de un token de un solo uso.
+ *
+ * Sigue sin haber caché ni debounce: llegan en commits posteriores.
  */
 
 import { config, resolveUrl } from "../../config.js";
@@ -46,12 +52,27 @@ import { CATEGORY, NO_HTTP_STATUS, fromClientFailure, fromResponse, fromTranspor
  * Este módulo no importa el módulo de sesión y no debe hacerlo nunca: la sesión
  * necesita hablar HTTP (login, refresh) y el transporte necesita un token, así
  * que importarse mutuamente sería un ciclo. Se rompe invirtiendo la dependencia:
- * aquí solo se declara la FORMA del proveedor ({ getToken() }), y quien tenga el
- * token se registra a sí mismo llamando a configureAuthProvider().
+ * aquí solo se declara la FORMA del proveedor, y quien tenga el token se
+ * registra a sí mismo llamando a configureAuthProvider().
  *
- * En un commit posterior, el módulo de sesión será quien haga ese registro
- * durante el arranque de la aplicación. Esta mención es documental: no hay
- * import, y este archivo compila y se prueba sin que ese módulo exista.
+ * CAPACIDADES DEL PROVEEDOR, todas OPCIONALES:
+ *
+ *   getToken()    -> string | null
+ *       El access token vigente. Si falta la capacidad o devuelve null, la
+ *       petición sale sin Authorization.
+ *
+ *   refresh()     -> Promise
+ *       Solicita una renovación. Resuelve cuando el par nuevo YA está guardado
+ *       (así el reintento lee el token nuevo con getToken()); rechaza con el
+ *       error real de la renovación. Si falta, un 401 se propaga sin reintento.
+ *
+ *   notify(event) -> void
+ *       Recibe un evento observado por el transporte, hoy solo el 403. Si falta,
+ *       no se notifica y la petición se comporta igual.
+ *
+ * Esta descripción es documental y está en términos de capacidades: este archivo
+ * no nombra a quien las implementa, no lo importa, y compila y se prueba sin que
+ * ese módulo exista.
  *
  * crud/ y resources/ nunca reciben ni pasan tokens: no saben que existen.
  */
@@ -68,6 +89,27 @@ async function resolveAuthToken(auth) {
     // Se acepta que getToken() sea síncrono o asíncrono.
     const token = await authProvider.getToken();
     return typeof token === "string" && token !== "" ? token : null;
+}
+
+/** ¿El proveedor puede renovar? Sin esta capacidad, un 401 se propaga tal cual. */
+function canRefresh() {
+    return Boolean(authProvider) && typeof authProvider.refresh === "function";
+}
+
+/**
+ * Notifica un evento al proveedor, si declaró la capacidad.
+ *
+ * Va envuelto en try/catch a propósito: un listener que lance no puede cambiar el
+ * resultado de la operación HTTP. Fallar al pintar un aviso no convierte una
+ * respuesta del servidor en otra cosa.
+ */
+function notifyProvider(event) {
+    if (!authProvider || typeof authProvider.notify !== "function") return;
+    try {
+        authProvider.notify(event);
+    } catch (_ignored) {
+        // Aislado: el transporte no depende de que la notificación funcione.
+    }
 }
 
 /* ------------------------------------------------------------------ *
@@ -285,7 +327,14 @@ async function buildHeaders({ extraHeaders, hasJsonBody, requestId, auth }) {
  * resultado no exitoso se lanza HttpError; no se devuelven errores como valor.
  */
 async function request(method, path, options = {}) {
-    const { query, body, signal: externalSignal, headers: extraHeaders, auth = true } = options;
+    const {
+        query,
+        body,
+        signal: externalSignal,
+        headers: extraHeaders,
+        auth = true,
+        retryAuth = true
+    } = options;
 
     const url = resolveUrl(path) + buildQuery(query);
     const operation = operationLabel(method, path);
@@ -439,10 +488,44 @@ async function request(method, path, options = {}) {
         }
     }
 
-    if (!outcome.ok) {
-        throw new HttpError(outcome.error);
+    if (outcome.ok) {
+        return outcome.value;
     }
-    return outcome.value;
+
+    const error = outcome.error;
+
+    // 403: no se refresca y no se cierra sesión. Un 403 no significa que la
+    // sesión sea inválida (CONTRATO §1.5): puede ser un usuario autenticado
+    // pidiendo algo reservado a ADMIN, o —hoy— la cadena de seguridad sin filtro
+    // JWT. Solo se informa y se propaga. El requestId viene de X-Request-Id, que
+    // llega incluso en el 403 vacío.
+    if (error.httpStatus === 403) {
+        notifyProvider({
+            type: "session:forbidden",
+            requestId: error.requestId,
+            error
+        });
+        throw new HttpError(error);
+    }
+
+    // 401 invalid_session: la sesión venció mientras la petición viajaba.
+    const isExpiredSession = error.httpStatus === 401 && error.code === "invalid_session";
+    if (isExpiredSession && retryAuth && canRefresh()) {
+        // Si la renovación falla, se propaga EXACTAMENTE su error, no el 401 que
+        // la disparó: un 503 del refresh debe llegar al llamador como 503 con su
+        // propio requestId. Envolverlo o sustituirlo por el 401 escondería la
+        // causa real del incidente.
+        await authProvider.refresh();
+
+        // Un solo reintento, con retryAuth:false para que un segundo 401 no
+        // vuelva a entrar en el ciclo. El token nuevo lo aporta getToken() al
+        // construir las cabeceras; este módulo no lo toca. Es una petición HTTP
+        // real y por tanto deja su PROPIA muestra en metrics.js: son dos
+        // intentos y ocultar uno falsearía la medición.
+        return request(method, path, { ...options, retryAuth: false });
+    }
+
+    throw new HttpError(error);
 }
 
 /* ------------------------------------------------------------------ *
