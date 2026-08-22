@@ -1,20 +1,23 @@
 package com.taller.auth.exception;
 
-import com.taller.auth.dto.ErrorResponse;
-import com.taller.auth.dto.FieldViolation;
-import io.micrometer.core.instrument.MeterRegistry;
-import jakarta.validation.ConstraintViolationException;
+import java.util.List;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.authorization.AuthorizationDeniedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
-import java.util.List;
+import com.taller.auth.dto.ErrorResponse;
+import com.taller.auth.dto.FieldViolation;
+
+import io.micrometer.core.instrument.MeterRegistry;
+import jakarta.validation.ConstraintViolationException;
 
 /**
  * Banda transversal "Exceptions" del diagrama del taller: cruza los tres
@@ -73,6 +76,20 @@ public class GlobalExceptionHandler {
         return respond(HttpStatus.BAD_REQUEST, "malformed_request", FaultKind.EXPECTED,
                 "Cuerpo de la peticion mal formado", false, null);
     }
+
+    @ExceptionHandler(AuthorizationDeniedException.class)
+public ResponseEntity<ErrorResponse> handleAuthorizationDenied(
+        AuthorizationDeniedException ex) {
+
+    return respond(
+            HttpStatus.FORBIDDEN,
+            "access_denied",
+            FaultKind.EXPECTED,
+            "No tiene permisos para realizar esta operacion",
+            false,
+            null
+    );
+}
 
     /**
      * Cualquier excepcion no prevista es, por definicion, una falta latente
