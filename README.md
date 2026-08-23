@@ -9,16 +9,19 @@ Practice* (Bass, Clements & Kazman, 4.ª ed.).
 | **Taller 2** | Extensión a gestión de productos, con modificabilidad (Cap. 8), safety, rendimiento y eficiencia energética |
 
 ---
-
 ## 📄 Documentación
 
 | Documento | Qué contiene |
 |---|---|
 | **[Documento de arquitectura](backend/docs/documentacion-arquitectura.md)** | **El entregable principal.** Escenarios de calidad, las cuatro vistas arquitectónicas, 12 ADR, taxonomía de fallas, tácticas de los Cap. 4 y 5, análisis cuantitativo de disponibilidad y plan de experimentos |
-| [Decisiones de Taller 2](docs/DECISIONS.md) | ADR de modificabilidad: estructura de módulos, motor de reglas, validaciones, *feature toggles*, DTOs y manejo de excepciones |
+| [Calidad e Integración](docs/QUALITY-INTEGRATION.md) | Estrategia completa de QA e integración: baseline de 125 pruebas, cobertura con JaCoCo, quality gates de líneas ≥80% y ramas ≥70%, pruebas E2E de API, validación de JWT y autorización 401/403, integración con PostgreSQL, health checks, pruebas de rendimiento con k6 y automatización mediante GitHub Actions |
+| [Decisiones de Taller 2](docs/DECISIONS.md) | ADR de modificabilidad: estructura de módulos, motor de reglas, validaciones, **feature toggles**, DTOs y manejo de excepciones |
 | [Ejercicio de modificabilidad](docs/EJERCICIO-MODIFICABILIDAD.md) | Guion reproducible que verifica el escenario ESC-M1 cronometrando el costo real de agregar un atributo y su regla |
 | [Guía de uso](backend/GUIA-DE-USO.md) | Cómo levantar el sistema, usar cada endpoint y reproducir los experimentos |
-| [Detalle del backend](backend/README.md) | Arranque, endpoints y estructura del tier de lógica |
+| [Detalle del backend](backend/README.md) | Arranque, endpoints, estructura del tier de lógica y configuración del backend |
+| [Pruebas E2E](qa/api-e2e.ps1) | Script reproducible que valida registro, login, JWT, acceso autorizado, respuestas 401/403, actualización de usuarios y persistencia utilizando el sistema desplegado |
+| [Pruebas de rendimiento](qa/performance.js) | Escenario de carga con k6 para 10 usuarios virtuales durante 30 segundos, con quality gates de **p95 < 2 s**, tasa de errores <1% y checks >99%. La ejecución validada obtuvo un **p95 de 177,84 ms y 0% de errores** |
+| [Integración continua](.github/workflows/backend-ci.yml) | Pipeline de GitHub Actions que ejecuta automáticamente la suite de pruebas, JaCoCo, quality gates y la prueba de concurrencia contra PostgreSQL 16 en cada push o pull request |
 | [Evidencia cruda](backend/docs/evidencia/) | CSV y logs de las corridas de caos y de las sondas de disponibilidad |
 
 ---
