@@ -19,8 +19,6 @@ Practice* (Bass, Clements & Kazman, 4.ª ed.).
 | [Ejercicio de modificabilidad](docs/EJERCICIO-MODIFICABILIDAD.md) | Guion reproducible que verifica el escenario ESC-M1 cronometrando el costo real de agregar un atributo y su regla |
 | [Guía de uso](backend/GUIA-DE-USO.md) | Cómo levantar el sistema, usar cada endpoint y reproducir los experimentos |
 | [Detalle del backend](backend/README.md) | Arranque, endpoints, estructura del tier de lógica y configuración del backend |
-| [Pruebas E2E](qa/api-e2e.ps1) | Script reproducible que valida registro, login, JWT, acceso autorizado, respuestas 401/403, actualización de usuarios y persistencia utilizando el sistema desplegado |
-| [Pruebas de rendimiento](qa/performance.js) | Escenario de carga con k6 para 10 usuarios virtuales durante 30 segundos, con quality gates de **p95 < 2 s**, tasa de errores <1% y checks >99%. La ejecución validada obtuvo un **p95 de 177,84 ms y 0% de errores** |
 | [Integración continua](.github/workflows/backend-ci.yml) | Pipeline de GitHub Actions que ejecuta automáticamente la suite de pruebas, JaCoCo, quality gates y la prueba de concurrencia contra PostgreSQL 16 en cada push o pull request |
 | [Evidencia cruda](backend/docs/evidencia/) | CSV y logs de las corridas de caos y de las sondas de disponibilidad |
 
